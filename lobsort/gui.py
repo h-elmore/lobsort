@@ -6,6 +6,14 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import os
+import PyQt6
+
+# Locate the wheel-bundled plugins when Python inherits a conda Qt prefix.
+_qt_plugins = Path(PyQt6.__file__).resolve().parent / "Qt6" / "plugins" / "platforms"
+if _qt_plugins.is_dir():
+    os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(_qt_plugins))
+
 import traceback
 import numpy as np
 import pandas as pd
