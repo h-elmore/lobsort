@@ -59,10 +59,14 @@ def canonical_label(label):
 
 
 def load_recording(path, segment_index=0):
-    """Read SMR/SMRX or ABF with Neo; return every segment's marker metadata."""
+    """Read SMR or ABF with Neo; return every segment's marker metadata."""
     from neo.io import Spike2IO, AxonIO
 
     path = Path(path)
+    if path.suffix.lower() not in {".smr", ".abf"}:
+        raise ValueError(
+            "Choose an SMR or ABF recording. SMRX requires a separate CED reader and is not supported in this release."
+        )
     reader = (
         AxonIO(filename=str(path))
         if path.suffix.lower() == ".abf"

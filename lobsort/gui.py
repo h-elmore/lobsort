@@ -270,7 +270,7 @@ class MainWindow(W.QMainWindow):
         layout.addWidget(recording)
         row = W.QHBoxLayout()
         self.path = W.QLineEdit()
-        self.path.setPlaceholderText("Choose an SMR, SMRX, or ABF recording")
+        self.path.setPlaceholderText("Choose an SMR or ABF recording")
         self.browse = W.QPushButton("Choose file…")
         self.browse.clicked.connect(self.choose_file)
         row.addWidget(self.path, 1)
@@ -442,7 +442,7 @@ class MainWindow(W.QMainWindow):
 
     def choose_file(self):
         path, _ = W.QFileDialog.getOpenFileName(
-            self, "Open recording", "", "Recordings (*.smr *.smrx *.abf)"
+            self, "Open recording", "", "Recordings (*.smr *.abf)"
         )
         if path:
             self.path.setText(path)

@@ -25,7 +25,7 @@ Use **File → Open demo recording** to try the interface with deterministic syn
 
 ## Sort a recording
 
-1. Choose an `.smr`, `.smrx`, or `.abf` file and click **Load recording**. Choose a segment if the recording has multiple segments; numbering starts at zero. Neo must support the particular recording format/version.
+1. Choose an `.smr` or `.abf` file and click **Load recording**. Choose a segment if the recording has multiple segments; numbering starts at zero. Neo must support the particular recording format/version. SMRX files require a separate CED reader and are not supported in this release.
 2. Choose the target channel, rhythm reference channel, and project folder. Preview all channels in **Review and refine**.
 3. Open **Adjust pipeline settings**. Set each channel's artifact cutoff in **mV**, bandpass limits, detection threshold, polarity, and shadow period. Set neuron names and desired example counts under **Training**. Defaults are starting points from the notebook, not universal physiological settings.
 4. Click **Filter and detect candidates**. Filtering runs for the target and reference channels. Masked artifacts appear as gaps in the filtered trace.
