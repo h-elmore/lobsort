@@ -1,0 +1,413 @@
+"""Linked multichannel recording browser with explicit edit modes."""
+
+import numpy as np
+from PyQt6 import QtCore, QtGui, QtWidgets as W
+import pyqtgraph as pg
+
+COLORS = ["#43d9ad", "#ffcb6b", "#82aaff", "#f78c6c", "#c792ea", "#89ddff"]
+
+
+def spin(low, high, value, step=0.1, decimals=3):
+    box = W.QDoubleSpinBox()
+    box.setRange(low, high)
+    box.setDecimals(decimals)
+    box.setSingleStep(step)
+    box.setValue(value)
+    return box
+
+
+class ScrollPlot(pg.PlotWidget):
+    scrolled = QtCore.pyqtSignal(float)
+    zoomed = QtCore.pyqtSignal(float)
+
+    def wheelEvent(self, event):
+        if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
+            self.zoomed.emit(1.2 if event.angleDelta().y() < 0 else 1 / 1.2)
+            event.accept()
+        else:
+            self.scrolled.emit(-event.angleDelta().y() / 120 * 0.15)
+            event.accept()
+
+
+class ReviewWidget(W.QWidget):
+    edited = QtCore.pyqtSignal()
+    message = QtCore.pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.review = None
+        self.plots = {}
+        self.syncing = False
+        outer = W.QVBoxLayout(self)
+        header = W.QLabel("Review & refine")
+        header.setObjectName("title")
+        outer.addWidget(header)
+        self.help = W.QLabel(
+            "Scroll to move through time · Ctrl + wheel to zoom · Choose an edit tool, then click the trace."
+        )
+        outer.addWidget(self.help)
+        tools = W.QHBoxLayout()
+        outer.addLayout(tools)
+        self.mode = W.QComboBox()
+        self.mode.addItems(
+            ["Browse", "Add / restore spike", "Deselect spike", "Relabel spike"]
+        )
+        self.channel = W.QComboBox()
+        self.label = W.QComboBox()
+        self.label.setEditable(True)
+        self.label.addItems(["PY", "LP", "PD", "Spike"])
+        self.snap = spin(0, 50, 2, 1)
+        self.snap.setSuffix(" ms")
+        self.signal = W.QComboBox()
+        self.signal.addItems(["Filtered", "Raw"])
+        self.rejected = W.QCheckBox("Show rejected")
+        self.rejected.setChecked(True)
+        self.yzoom = spin(0.1, 100, 1, 0.5, 2)
+        for title, widget in [
+            ("Tool", self.mode),
+            ("Edit channel", self.channel),
+            ("Label", self.label),
+            ("Snap radius", self.snap),
+            ("Trace", self.signal),
+            ("Y zoom", self.yzoom),
+        ]:
+            tools.addWidget(W.QLabel(title))
+            tools.addWidget(widget)
+        tools.addWidget(self.rejected)
+        self.scroll = W.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        outer.addWidget(self.scroll, 1)
+        self.plot_container = W.QWidget()
+        self.plot_layout = W.QVBoxLayout(self.plot_container)
+        self.scroll.setWidget(self.plot_container)
+        nav = W.QHBoxLayout()
+        outer.addLayout(nav)
+        self.play = W.QPushButton("Play")
+        self.play.setCheckable(True)
+        self.start = spin(-1e9, 1e9, 0, 0.1)
+        self.start.setSuffix(" s")
+        self.window = spin(0.005, 1e8, 15, 1)
+        self.window.setSuffix(" s")
+        for title, fn in [
+            ("←", lambda: self.shift(-0.75)),
+            ("→", lambda: self.shift(0.75)),
+            ("Previous spike", lambda: self.jump(-1)),
+            ("Next spike", lambda: self.jump(1)),
+            ("Undo", self.undo),
+            ("Redo", self.redo),
+        ]:
+            b = W.QPushButton(title)
+            b.clicked.connect(fn)
+            nav.addWidget(b)
+        nav.addWidget(self.play)
+        nav.addWidget(W.QLabel("Start"))
+        nav.addWidget(self.start)
+        nav.addWidget(W.QLabel("Window"))
+        nav.addWidget(self.window)
+        self.slider = W.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.slider.setRange(0, 1000000)
+        outer.addWidget(self.slider)
+        self.status = W.QLabel("Open a recording or a saved review.")
+        outer.addWidget(self.status)
+        self.timer = QtCore.QTimer(self)
+        self.timer.setInterval(150)
+        self.timer.timeout.connect(lambda: self.shift(0.05))
+        self.play.toggled.connect(
+            lambda on: self.timer.start() if on else self.timer.stop()
+        )
+        self.start.valueChanged.connect(self.refresh)
+        self.window.valueChanged.connect(self.refresh)
+        self.slider.valueChanged.connect(self.slider_changed)
+        for w in [self.signal, self.channel]:
+            w.currentTextChanged.connect(self.refresh)
+        self.rejected.toggled.connect(self.refresh)
+        self.yzoom.valueChanged.connect(self.refresh)
+        self.shortcuts = []
+        for key, fn in [
+            ("Left", lambda: self.shift(-0.25)),
+            ("Right", lambda: self.shift(0.25)),
+            ("Space", lambda: self.play.toggle()),
+            ("Ctrl+Z", self.undo),
+            ("Ctrl+Shift+Z", self.redo),
+        ]:
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
+            shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(fn)
+            self.shortcuts.append(shortcut)
+
+    def set_review(self, review):
+        self.timer.stop()
+        self.play.setChecked(False)
+        self.review = review
+        while self.plot_layout.count():
+            item = self.plot_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.plots = {}
+        self.channel.clear()
+        self.channel.addItems(list(review.processed))
+        self.first = min(float(d["time"][0]) for d in review.processed.values())
+        self.last = max(float(d["time"][-1]) for d in review.processed.values())
+        self.start.setRange(self.first, self.last)
+        self.window.setMaximum(max(0.005, self.last - self.first))
+        self.window.setValue(min(15, max(0.005, self.last - self.first)))
+        self.start.setValue(self.first)
+        for name, data in review.processed.items():
+            plot = ScrollPlot()
+            plot.setMinimumHeight(230)
+            plot.setBackground("#141d2c")
+            plot.showGrid(x=True, y=True, alpha=0.15)
+            plot.setLabel("left", name, units=data.get("units", ""))
+            plot.setLabel("bottom", "Time", units="s")
+            plot.setMouseEnabled(x=False, y=True)
+            plot.scrolled.connect(self.shift)
+            plot.zoomed.connect(
+                lambda factor: self.window.setValue(self.window.value() * factor)
+            )
+            plot.scene().sigMouseClicked.connect(
+                lambda event, n=name: self.clicked(n, event)
+            )
+            self.plot_layout.addWidget(plot)
+            self.plots[name] = (plot, plot.plot(pen=pg.mkPen("#a7b6cc", width=1)))
+        labels = sorted(
+            {
+                str(label)
+                for df in review.tables.values()
+                for label in df.manual_label.unique()
+                if str(label).lower() not in ["noise", "nan", "uncertain"]
+            }
+        )
+        existing = {self.label.itemText(i) for i in range(self.label.count())}
+        self.label.addItems([s for s in labels if s not in existing])
+        self.refresh()
+
+    def shift(self, fraction):
+        if self.review:
+            self.start.setValue(
+                np.clip(
+                    self.start.value() + fraction * self.window.value(),
+                    self.first,
+                    max(self.first, self.last - self.window.value()),
+                )
+            )
+
+    def slider_changed(self, value):
+        if self.review and not self.syncing:
+            self.start.setValue(
+                self.first
+                + (max(self.first, self.last - self.window.value()) - self.first)
+                * value
+                / 1e6
+            )
+
+    def refresh(self, *_):
+        if not self.review or not self.plots:
+            return
+        self.syncing = True
+        begin = float(
+            np.clip(
+                self.start.value(),
+                self.first,
+                max(self.first, self.last - self.window.value()),
+            )
+        )
+        end = min(self.last, begin + self.window.value())
+        self.start.blockSignals(True)
+        self.start.setValue(begin)
+        self.start.blockSignals(False)
+        self.slider.setValue(
+            int(
+                (begin - self.first)
+                / max(1e-12, self.last - self.window.value() - self.first)
+                * 1e6
+            )
+        )
+        self.syncing = False
+        count = 0
+        all_labels = sorted(
+            {
+                str(label)
+                for df in self.review.tables.values()
+                for label in df.manual_label.unique()
+            }
+        )
+        color_map = {
+            label: COLORS[i % len(COLORS)] for i, label in enumerate(all_labels)
+        }
+        for name, (plot, trace) in self.plots.items():
+            data = self.review.processed[name]
+            t = data["time"]
+            values = data[
+                (
+                    "raw_signal"
+                    if self.signal.currentText() == "Raw"
+                    else "filtered_signal"
+                )
+            ]
+            lo, hi = np.searchsorted(t, [begin, end])
+            hi = min(len(t), hi + 1)
+            # Pyqtgraph peak downsampling preserves narrow spikes in long windows.
+            trace.setData(t[lo:hi], values[lo:hi], connect="finite")
+            trace.setDownsampling(auto=True, method="peak")
+            trace.setClipToView(True)
+            for item in list(plot.items()):
+                if isinstance(item, pg.ScatterPlotItem):
+                    plot.removeItem(item)
+            df = self.review.tables.get(name)
+            if df is not None and len(df):
+                visible = df[(df.time_seconds >= begin) & (df.time_seconds <= end)]
+                for (label, accepted), group in visible.groupby(
+                    ["manual_label", "accepted_as_spike"]
+                ):
+                    if not accepted and not self.rejected.isChecked():
+                        continue
+                    indices = group.sample_index.to_numpy(dtype=int)
+                    indices = np.clip(indices, 0, len(t) - 1)
+                    color = (
+                        color_map.get(str(label), "#8899aa") if accepted else "#596578"
+                    )
+                    scatter = pg.ScatterPlotItem(
+                        x=t[indices],
+                        y=values[indices],
+                        symbol="o" if accepted else "x",
+                        size=10 if accepted else 7,
+                        pen=pg.mkPen(color, width=2),
+                        brush=pg.mkBrush(color) if accepted else None,
+                        tip=lambda x, y, d: f"{d}",
+                        data=[
+                            f'{label} · {"accepted" if accepted else "rejected"}'
+                            for _ in indices
+                        ],
+                    )
+                    plot.addItem(scatter)
+                    count += int(accepted) * len(group)
+            plot.setXRange(begin, end, padding=0)
+            finite = values[lo:hi]
+            finite = finite[np.isfinite(finite)]
+            if len(finite):
+                low, high = float(np.min(finite)), float(np.max(finite))
+                center = (low + high) / 2
+                half = max((high - low) / 2, 1e-9) / self.yzoom.value()
+                plot.setYRange(center - half, center + half, padding=0.08)
+            plot.setTitle(
+                f"{name}"
+                + (" • editing" if name == self.channel.currentText() else ""),
+                color="#43d9ad" if name == self.channel.currentText() else "#b5c3d9",
+            )
+        legend = "  ·  ".join(
+            f"{label}" for label in all_labels if label.lower() != "noise"
+        )
+        self.status.setText(
+            f"{begin:.3f}–{end:.3f} s  |  {count} accepted spikes visible  |  {legend}"
+        )
+
+    def clicked(self, name, event):
+        if (
+            not self.review
+            or self.mode.currentIndex() == 0
+            or event.button() != QtCore.Qt.MouseButton.LeftButton
+        ):
+            return
+        if name != self.channel.currentText():
+            return
+        plot = self.plots[name][0]
+        if not plot.sceneBoundingRect().contains(event.scenePos()):
+            return
+        point = plot.getViewBox().mapSceneToView(event.scenePos())
+        data = self.review.processed[name]
+        t = data["time"]
+        x = point.x()
+        if x < t[0] or x > t[-1]:
+            return
+        action = ["browse", "add", "remove", "relabel"][self.mode.currentIndex()]
+        index = int(
+            np.argmin(
+                abs(
+                    t[
+                        max(0, np.searchsorted(t, x) - 1) : min(
+                            len(t), np.searchsorted(t, x) + 1
+                        )
+                    ]
+                    - x
+                )
+            )
+        ) + max(0, np.searchsorted(t, x) - 1)
+        df = self.review.tables.get(name)
+        # Existing marker hit tolerance follows screen pixels, independent of sampling rate.
+        tolerance = self.window.value() * 12 / max(1, plot.width())
+        if df is not None and len(df):
+            eligible = df if action != "remove" else df[df.accepted_as_spike]
+            if len(eligible):
+                row = eligible.iloc[
+                    int(np.argmin(abs(eligible.time_seconds.to_numpy() - x)))
+                ]
+                if abs(row.time_seconds - x) <= tolerance:
+                    index = int(row.sample_index)
+                elif action in ["remove", "relabel"]:
+                    return
+        elif action in ["remove", "relabel"]:
+            return
+        if (
+            action == "add"
+            and self.snap.value() > 0
+            and (df is None or index not in set(df.sample_index))
+        ):
+            radius = self.snap.value() / 1000
+            lo, hi = np.searchsorted(t, [x - radius, x + radius])
+            hi = min(len(t), max(lo + 1, hi))
+            values = data["filtered_signal"][lo:hi]
+            if len(values) and np.any(np.isfinite(values)):
+                polarity = self.review.metadata.get("settings", {}).get(
+                    "polarity", "both"
+                )
+                score = (
+                    values
+                    if polarity == "positive"
+                    else -values if polarity == "negative" else abs(values)
+                )
+                index = lo + int(np.nanargmax(score))
+        label = self.label.currentText().strip()
+        if action != "remove" and (
+            not label or label.lower() in ["noise", "uncertain", "unlabeled"]
+        ):
+            self.message.emit(
+                "Choose a neuron label before adding or relabeling a spike."
+            )
+            return
+        try:
+            if self.review.change(name, index, action, label):
+                self.refresh()
+                self.edited.emit()
+        except ValueError as exc:
+            self.message.emit(str(exc))
+
+    def undo(self):
+        if self.review and self.review.undo():
+            self.refresh()
+            self.edited.emit()
+
+    def redo(self):
+        if self.review and self.review.redo():
+            self.refresh()
+            self.edited.emit()
+
+    def jump(self, direction):
+        if not self.review:
+            return
+        df = self.review.tables.get(self.channel.currentText())
+        if df is None:
+            return
+        times = np.sort(df.loc[df.accepted_as_spike, "time_seconds"].to_numpy())
+        center = self.start.value() + self.window.value() / 2
+        if not len(times):
+            return
+        i = np.searchsorted(
+            times, center, side="right" if direction > 0 else "left"
+        ) + (0 if direction > 0 else -1)
+        self.start.setValue(
+            np.clip(
+                times[i % len(times)] - self.window.value() / 2,
+                self.first,
+                max(self.first, self.last - self.window.value()),
+            )
+        )

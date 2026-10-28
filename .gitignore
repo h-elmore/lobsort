@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.DS_Store
+*.smr
+*.smrx
+*.abf
+*.joblib
+*.lobsort
+*.npz
