@@ -486,6 +486,9 @@ class MainWindow(W.QMainWindow):
         if text.strip():
             self.log.appendPlainText(text.strip())
 
+    def refresh_channel_options(self, *_):
+        """Restore channel choices without changing the saved label library."""
+        target = self.target.currentText()
     def channel_name(self, source):
         return self.settings.get("channel_names", {}).get(source, source)
 
@@ -582,6 +585,7 @@ class MainWindow(W.QMainWindow):
 
     def channel_options_changed(self, *_):
         self.close_labeler()
+        target = self.target.currentText()
         target = self.channel_key(self.target)
         if target:
             self.settings.setdefault("training_labels_by_channel", {})[target] = self.selected_training_labels()
@@ -1065,6 +1069,9 @@ class MainWindow(W.QMainWindow):
             for key in (
                 "label_targets", "training_labels_by_channel",
                 "sorting_methods_by_channel", "detection_labels_by_channel",
+            ):
+                if key in saved:
+                    self.settings[key] = copy.deepcopy(saved[key])
                 "channel_names",
             ):
                 if key in saved:
@@ -1132,6 +1139,9 @@ class MainWindow(W.QMainWindow):
                     settings["channel_names"] = copy.deepcopy(self.settings.get("channel_names", {}))
                 dialog = SettingsDialog(settings, self)
                 if dialog.exec():
+                    self.close_labeler()
+                    self.settings = dialog.settings
+                    self.refresh_channel_options()
                     sources = [c["name"] for c in self.channels] or list(self.review.processed if self.review else [])
                     if sources:
                         validate_channel_names(sources, dialog.settings.get("channel_names", {}))
