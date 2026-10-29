@@ -22,6 +22,7 @@ import pyqtgraph as pg
 from .engine import PipelineSession, default_settings, load_recording
 from .curation import Review
 from .viewer import ReviewWidget, spin
+from .preprocessing_view import PreprocessingWidget
 
 STYLE = """
 QWidget { background:#101827; color:#e4ecf7; font-size:13px; }
@@ -318,6 +319,9 @@ class MainWindow(W.QMainWindow):
         self.configure = W.QPushButton("Adjust pipeline settings…")
         self.configure.clicked.connect(self.configure_settings)
         row.addWidget(self.configure)
+        self.preview_button = W.QPushButton("Preview filtering on signal…")
+        self.preview_button.clicked.connect(lambda: self.tabs.setCurrentWidget(self.preprocessing))
+        row.addWidget(self.preview_button)
         self.prepare_button = W.QPushButton("1. Filter and detect candidates")
         self.prepare_button.setObjectName("primary")
         self.prepare_button.clicked.connect(self.prepare)
@@ -363,8 +367,11 @@ class MainWindow(W.QMainWindow):
         self.progress = W.QProgressBar()
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
+        self.preprocessing = PreprocessingWidget()
+        self.preprocessing.applied.connect(self.apply_preprocessing)
+        self.tabs.addTab(self.preprocessing, "2  Preview filtering")
         self.viewer = ReviewWidget()
-        self.tabs.addTab(self.viewer, "2  Review and refine")
+        self.tabs.addTab(self.viewer, "3  Review and refine")
         self.viewer.edited.connect(self.changed)
         self.viewer.message.connect(
             lambda text: W.QMessageBox.information(self, "Review", text)
@@ -417,6 +424,8 @@ class MainWindow(W.QMainWindow):
             self.segment,
         ]:
             w.setEnabled(not busy)
+        self.preprocessing.setEnabled(bool(self.channels) and not busy)
+        self.preview_button.setEnabled(bool(self.channels) and not busy)
         self.prepare_button.setEnabled(bool(self.channels) and not busy)
         for w in [
             self.labels_button,
@@ -516,16 +525,27 @@ class MainWindow(W.QMainWindow):
             ),
         )
         self.viewer.set_review(self.review)
+        self.preprocessing.set_recording(self.channels, self.settings)
         self.dirty = False
         self.append_log(
-            "Recording loaded. Preview traces in Review & refine, or filter and detect candidates here."
+            "Recording loaded. Open Preview filtering to adjust preprocessing on the signal before sorting."
         )
         self.update_buttons()
+
+    def apply_preprocessing(self, settings):
+        # Only preprocessing controls belong to this draft; keep current setup choices.
+        keys = set(self.preprocessing.controls) - {"artifact"}
+        keys.update({"artifact_thresholds_mV", "polarity"})
+        self.settings.update({k: copy.deepcopy(settings[k]) for k in keys})
+        self.close_labeler()
+        self.invalidate()
+        self.append_log("Preview settings applied. Filter and detect candidates to use them.")
 
     def configure_settings(self):
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec():
             self.settings = dialog.settings
+            self.preprocessing.set_recording(self.channels, self.settings)
             self.invalidate()
 
     def prepare(self):
@@ -850,6 +870,7 @@ class MainWindow(W.QMainWindow):
                 dialog = SettingsDialog(settings, self)
                 if dialog.exec():
                     self.settings = dialog.settings
+                    self.preprocessing.set_recording(self.channels, self.settings)
                     self.invalidate()
             except Exception:
                 self.failed(traceback.format_exc())
@@ -869,6 +890,7 @@ class MainWindow(W.QMainWindow):
         )
         self.target.setCurrentText("Red")
         self.reference.setCurrentText("Green")
+        self.preprocessing.set_recording(self.channels, self.settings)
         self.append_log("Synthetic demo loaded. No biological data are included.")
 
     def can_leave(self):
@@ -898,6 +920,7 @@ class MainWindow(W.QMainWindow):
     def closeEvent(self, event):
         if self.can_leave():
             self.close_labeler()
+            self.preprocessing.shutdown()
             event.accept()
         else:
             event.ignore()
@@ -913,3 +936,4 @@ def main():
     if "--demo" in sys.argv:
         window.demo()
     sys.exit(app.exec())
+
