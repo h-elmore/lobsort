@@ -81,3 +81,38 @@ The tests exercise detection equivalence with the notebook, both training and mo
 Initial local validation used synthetic recordings. The notebook's hardcoded example SMR file was unavailable, so real-recording input and biological sorting accuracy remain unvalidated. Manual review supports correction but cannot guarantee 100% accuracy.
 
 See [PORTING.md](PORTING.md) for notebook-stage mapping and intentional changes.
+
+
+### Preview filtering before sorting
+
+After loading an SMR/ABF recording (or the demo), open **Preview filtering on
+signal…** or the **Preview filtering** tab. Choose any loaded channel, then browse
+with **Start** and **Window**. The upper plot shows the median-centered raw signal;
+red portions mark samples excluded by the artifact cutoff and padding. Drag either
+gold horizontal line to change that channel's artifact cutoff, or use its slider
+and numeric control. Thresholds are entered in mV and converted to the recording's
+native voltage units.
+
+Adjust the bandpass cutoffs, filter order, artifact padding, detection threshold,
+spike spacing, polarity, and adaptive noise controls. The lower plot shows the
+filtered signal, adaptive detection thresholds, and candidate peaks. Candidates
+are previews, not classified spikes. Statistics report excluded time and candidate
+counts across the complete channel. The effective high cutoff is capped at 45%
+of the sampling rate, exactly as in sorting.
+
+Edits are a draft until you click **Apply preview settings to sorting**. Artifact
+cutoffs are channel-specific; bandpass, padding, and detection settings are shared.
+You can preview the rhythm reference channel as well as the channel to sort.
+**Reset draft** restores the most recently applied/current sorting settings.
+Applying invalidates the previous candidate session; return to **Recording and
+sorting** and run **Filter and detect candidates** to create candidates with the
+new settings. Existing review decisions are retained by the existing review workflow.
+Settings profiles and saved reviews continue to include the applied settings.
+
+Preview calculations run in the background over the full channel, using the same
+shipped filter and detector code as sorting. Display windows are sliced afterward
+so moving around does not change adaptive noise estimates or introduce window-edge
+filter artifacts. Large recordings can take time and additional memory; the latest
+draft is displayed only when its calculation finishes. Invalid settings or excessive
+artifact exclusion show an inline explanation and cannot be applied. No pipeline
+output files are written by previewing.
