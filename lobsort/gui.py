@@ -1478,10 +1478,52 @@ class MainWindow(W.QMainWindow):
                 )
             )
             self.animal_id.setText(self.review.metadata.get("animal_id", ""))
-            self.refresh_channel_options()
             self.project_path = Path(path)
             self.session = None
-            self.channels = []
+            # Resume sorting from self-contained signals without reloading (and
+            # discarding) the accepted reference tables in an unfinished review.
+            self.channels = [
+                dict(
+                    name=name,
+                    time=data["time"],
+                    values=data["raw_signal"],
+                    units=data.get("units", ""),
+                )
+                for name, data in self.review.processed.items()
+                if "raw_signal" in data
+            ]
+            for key in default_settings():
+                if key in saved:
+                    self.settings[key] = copy.deepcopy(saved[key])
+            self.settings["channel_names"] = copy.deepcopy(
+                self.review.metadata.get(
+                    "channel_names", saved.get("channel_names", {})
+                )
+            )
+            self.recording_path = self.review.metadata.get(
+                "recording", str(Path(path).resolve())
+            )
+            self.recording_segment = int(self.review.metadata.get("segment", 0))
+            self.path.setText(self.recording_path)
+            self.segment.setValue(self.recording_segment)
+            self.output.setText(str(Path(path).parent))
+            for combo, key in [
+                (self.target, "channel_name"),
+                (self.reference, "reference_channel_name"),
+            ]:
+                combo.blockSignals(True)
+                combo.clear()
+                for channel in self.channels:
+                    combo.addItem(self.channel_name(channel["name"]), channel["name"])
+                index = combo.findData(self.settings[key])
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+            self.refresh_channel_options()
+            self.preprocessing.set_recording(self.channels, self.settings)
+            self.record_info.setText(
+                f"Saved review · {len(self.channels)} stored channels · accepted spike decisions retained"
+            )
             self.markers = self.review.metadata.get("markers", [])
             self.viewer.set_review(self.review)
             self.update_channel_names()

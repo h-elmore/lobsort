@@ -303,6 +303,55 @@ class TimingGuiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = W.QApplication.instance() or W.QApplication([])
 
+    def test_saved_unfinished_review_resumes_training_with_reference_intact(self):
+        with tempfile.TemporaryDirectory() as folder:
+            review = review_with_reference()
+            settings = default_settings()
+            settings.update(threshold_factor=4.0, shadow_period_ms=2.0)
+            settings["unit_timing_references_by_channel"] = {
+                "Red": {"channel": "Green", "label": "PD"}
+            }
+            settings["include_moderate_probability_spikes"] = True
+            review.metadata.update(
+                settings=settings, recording="/missing/original.smr", segment=0
+            )
+            path = Path(folder) / "unfinished.lobsort"
+            review.save(path)
+            window = MainWindow()
+            try:
+                with patch.object(
+                    W.QFileDialog, "getOpenFileName", return_value=(str(path), "")
+                ):
+                    window.open_project()
+                self.assertTrue(window.prepare_button.isEnabled())
+                self.assertEqual(len(window.channels), 2)
+                self.assertTrue(window.timing_group.isChecked())
+                self.assertEqual(window.timing_unit.currentText(), "PD")
+                self.assertEqual(window.acceptance_choice.currentIndex(), 1)
+                window.prepare()
+                deadline = time.monotonic() + 20
+                while (
+                    window.worker
+                    and window.worker.isRunning()
+                    and time.monotonic() < deadline
+                ):
+                    self.app.processEvents()
+                    time.sleep(0.01)
+                self.app.processEvents()
+                self.assertIsNotNone(window.session)
+                self.assertEqual(len(window.review.tables["Green"]), 4)
+                window.attach_timing_reference()
+                np.testing.assert_allclose(
+                    window.session.timing_reference["times"],
+                    [0.5, 0.6, 1.5, 1.6],
+                    atol=1e-15,
+                )
+            finally:
+                if window.worker:
+                    window.worker.wait(20000)
+                window.dirty = False
+                window.close()
+
     def test_reference_choice_unsaved_edits_profile_and_session_sync(self):
         with tempfile.TemporaryDirectory() as folder:
             window = MainWindow()

@@ -272,3 +272,10 @@ training recording's reference times are never substituted. Legacy waveform and
 context models still work. New review settings remember reference choices and
 confidence selection. Download the updated code to use these features; an
 already running copy does not update itself.
+
+**Continue an unfinished recording after updating:** save a `.lobsort` review in
+the old copy, close it, and open that review in the updated copy. Stored raw
+signals can now be used to prepare/train additional channels without loading the
+original file again or discarding the already accepted reference spikes. Training
+labels are still separate workspace CSVs; use **Import training labels** if an
+older workspace's labels are not automatically found.
