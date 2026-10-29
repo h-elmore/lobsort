@@ -23,6 +23,7 @@ from .engine import PipelineSession, default_settings, load_recording
 from .curation import Review
 from .viewer import ReviewWidget, spin
 from .preprocessing_view import PreprocessingWidget
+from .recording_metadata import validate_channel_names, file_stem
 
 STYLE = """
 QWidget { background:#101827; color:#e4ecf7; font-size:13px; }
@@ -51,6 +52,46 @@ class Worker(QtCore.QThread):
             self.done.emit(self.fn())
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+
+class ChannelNamesDialog(W.QDialog):
+    def __init__(self, sources, names, parent=None):
+        super().__init__(parent)
+        self.sources = list(sources)
+        self.names = dict(names)
+        self.setWindowTitle("Name recording channels")
+        self.resize(650, 430)
+        layout = W.QVBoxLayout(self)
+        explanation = W.QLabel("Give each channel its nerve name, such as pdn or lvn. Original recording identifiers are retained.")
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        self.table = W.QTableWidget(len(sources), 2)
+        self.table.setHorizontalHeaderLabels(["Recorded channel", "Nerve / channel name"])
+        self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.ResizeMode.Stretch)
+        for row, source in enumerate(sources):
+            item = W.QTableWidgetItem(source)
+            item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, 0, item)
+            self.table.setItem(row, 1, W.QTableWidgetItem(names.get(source, source)))
+        layout.addWidget(self.table)
+        self.error = W.QLabel()
+        self.error.setWordWrap(True)
+        layout.addWidget(self.error)
+        buttons = W.QDialogButtonBox(W.QDialogButtonBox.StandardButton.Save | W.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.validate)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def validate(self):
+        try:
+            proposed = {
+                source: self.table.item(row, 1).text() if self.table.item(row, 1) else ""
+                for row, source in enumerate(self.sources)
+            }
+            self.names = validate_channel_names(self.sources, proposed)
+            self.accept()
+        except ValueError as exc:
+            self.error.setText(str(exc))
 
 
 class SettingsDialog(W.QDialog):
@@ -143,7 +184,12 @@ class SettingsDialog(W.QDialog):
                     )
                     widget.setMinimumHeight(220)
                     for row, (k, v) in enumerate(value.items()):
-                        widget.setItem(row, 0, W.QTableWidgetItem(k))
+                        name = settings.get("channel_names", {}).get(k, k) if key == "artifact_thresholds_mV" else k
+                        item = W.QTableWidgetItem(name)
+                        item.setData(QtCore.Qt.ItemDataRole.UserRole, k)
+                        if name != k:
+                            item.setToolTip(f"Recorded channel: {k}")
+                        widget.setItem(row, 0, item)
                         widget.setItem(row, 1, W.QTableWidgetItem(str(v)))
                 elif isinstance(value, bool):
                     widget = W.QCheckBox()
@@ -192,7 +238,16 @@ class SettingsDialog(W.QDialog):
                         k = w.item(row, 0)
                         v = w.item(row, 1)
                         if k and k.text().strip():
-                            value[k.text().strip()] = (
+                            name = k.text().strip()
+                            if key == "artifact_thresholds_mV":
+                                source = k.data(QtCore.Qt.ItemDataRole.UserRole)
+                                original_display = self.settings.get("channel_names", {}).get(source, source)
+                                if source and name == original_display:
+                                    name = source
+                                else:
+                                    aliases = {v: k for k, v in self.settings.get("channel_names", {}).items()}
+                                    name = aliases.get(name, name)
+                            value[name] = (
                                 int(v.text())
                                 if key == "label_targets"
                                 else float(v.text())
@@ -277,6 +332,11 @@ class MainWindow(W.QMainWindow):
         recording = W.QGroupBox("Recording")
         f = W.QFormLayout(recording)
         layout.addWidget(recording)
+        self.animal_id = W.QLineEdit()
+        self.animal_id.setPlaceholderText("e.g. 1001_41 — used to name the export folder")
+        self.animal_id.setMaxLength(120)
+        self.animal_id.textChanged.connect(self.animal_id_changed)
+        f.addRow("Animal ID", self.animal_id)
         row = W.QHBoxLayout()
         self.path = W.QLineEdit()
         self.path.setPlaceholderText("Choose an SMR or ABF recording")
@@ -294,6 +354,9 @@ class MainWindow(W.QMainWindow):
         row.addWidget(W.QLabel("Segment (starts at 0)"))
         row.addWidget(self.segment)
         row.addWidget(self.load)
+        self.name_channels = W.QPushButton("Name channels…")
+        self.name_channels.clicked.connect(self.rename_channels)
+        row.addWidget(self.name_channels)
         row.addStretch()
         f.addRow(row)
         self.record_info = W.QLabel(
@@ -426,6 +489,62 @@ class MainWindow(W.QMainWindow):
     def refresh_channel_options(self, *_):
         """Restore channel choices without changing the saved label library."""
         target = self.target.currentText()
+    def channel_name(self, source):
+        return self.settings.get("channel_names", {}).get(source, source)
+
+    @staticmethod
+    def channel_key(combo):
+        return combo.currentData() or combo.currentText()
+
+    @staticmethod
+    def select_channel(combo, source):
+        index = combo.findData(source)
+        if index < 0:
+            index = combo.findText(source)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def animal_id_changed(self, text):
+        if self.review and self.review.metadata.get("animal_id", "") != text.strip():
+            self.review.metadata["animal_id"] = text.strip()
+            self.changed()
+
+    def rename_channels(self):
+        sources = [c["name"] for c in self.channels] or list(self.review.processed if self.review else [])
+        if not sources:
+            return
+        dialog = ChannelNamesDialog(sources, self.settings.get("channel_names", {}), self)
+        if dialog.exec():
+            self.apply_channel_names(dialog.names)
+
+    def apply_channel_names(self, names):
+        sources = [c["name"] for c in self.channels] or list(self.review.processed if self.review else [])
+        names = validate_channel_names(sources, names)
+        self.close_labeler()
+        self.settings["channel_names"] = names
+        if self.session:
+            self.session.settings["channel_names"] = copy.deepcopy(names)
+        if self.review:
+            self.review.metadata["channel_names"] = copy.deepcopy(names)
+            self.review.metadata.setdefault("settings", {})["channel_names"] = copy.deepcopy(names)
+        self.update_channel_names()
+        self.changed()
+
+    def update_channel_names(self):
+        for combo in (self.target, self.reference):
+            combo.blockSignals(True)
+            for index in range(combo.count()):
+                source = combo.itemData(index) or combo.itemText(index)
+                combo.setItemData(index, source)
+                combo.setItemText(index, self.channel_name(source))
+            combo.blockSignals(False)
+        self.preprocessing.set_channel_names(self.settings.get("channel_names", {}))
+        if self.review:
+            self.viewer.update_channel_names()
+
+    def refresh_channel_options(self, *_):
+        """Restore channel choices without changing the saved label library."""
+        target = self.channel_key(self.target)
         library = self.settings["label_targets"]
         selected = self.settings.get("training_labels_by_channel", {}).get(
             target, list(library)
@@ -467,6 +586,7 @@ class MainWindow(W.QMainWindow):
     def channel_options_changed(self, *_):
         self.close_labeler()
         target = self.target.currentText()
+        target = self.channel_key(self.target)
         if target:
             self.settings.setdefault("training_labels_by_channel", {})[target] = self.selected_training_labels()
             self.settings.setdefault("sorting_methods_by_channel", {})[target] = [
@@ -508,10 +628,12 @@ class MainWindow(W.QMainWindow):
             self.path,
             self.segment,
             self.kind,
+            self.animal_id,
         ]:
             w.setEnabled(not busy)
         self.preprocessing.setEnabled(bool(self.channels) and not busy)
         self.preview_button.setEnabled(bool(self.channels) and not busy)
+        self.name_channels.setEnabled(bool(self.channels or self.review) and not busy)
         self.prepare_button.setEnabled(bool(self.channels) and not busy)
         ready = self.session is not None and not busy
         selected_count = len(self.selected_training_labels())
@@ -585,19 +707,25 @@ class MainWindow(W.QMainWindow):
 
     def loaded(self, result, path, segment):
         self.channels, self.markers, nsegments = result
+        try:
+            validate_channel_names([c["name"] for c in self.channels], self.settings.get("channel_names", {}))
+        except ValueError:
+            self.settings["channel_names"] = {}
+            self.append_log("Saved channel names conflict with this recording. Use Name channels to assign new nerve names.")
         self.recording_path = str(Path(path).resolve())
         self.recording_segment = segment
         self.session = None
         self.project_path = None
         for combo in [self.target, self.reference]:
             combo.clear()
-            combo.addItems([c["name"] for c in self.channels])
+            for c in self.channels:
+                combo.addItem(self.channel_name(c["name"]), c["name"])
         for combo, key in [
             (self.target, "channel_name"),
             (self.reference, "reference_channel_name"),
         ]:
             if self.settings[key] in [c["name"] for c in self.channels]:
-                combo.setCurrentText(self.settings[key])
+                self.select_channel(combo, self.settings[key])
         self.record_info.setText(
             f"{Path(path).name} · {len(self.channels)} channels · {nsegments} segments · {len(self.markers)} event markers"
         )
@@ -616,14 +744,16 @@ class MainWindow(W.QMainWindow):
                 recording=self.recording_path,
                 segment=segment,
                 markers=self.markers,
-                settings=self.settings,
+                settings=copy.deepcopy(self.settings),
+                animal_id=self.animal_id.text().strip(),
+                channel_names=copy.deepcopy(self.settings.get("channel_names", {})),
             ),
         )
         self.viewer.set_review(self.review)
         self.preprocessing.set_recording(self.channels, self.settings)
         self.dirty = False
         self.append_log(
-            "Recording loaded. Open Preview filtering to adjust preprocessing on the signal before sorting."
+            "Recording loaded. Enter the animal ID and use Name channels to assign nerve names. Open Preview filtering before sorting."
         )
         self.update_buttons()
 
@@ -642,14 +772,17 @@ class MainWindow(W.QMainWindow):
             self.close_labeler()
             self.settings = dialog.settings
             self.refresh_channel_options()
+            if self.review:
+                self.review.metadata["channel_names"] = copy.deepcopy(self.settings.get("channel_names", {}))
+            self.update_channel_names()
             self.preprocessing.set_recording(self.channels, self.settings)
             self.invalidate()
 
     def prepare(self):
         self.close_labeler()
         self.settings.update(
-            channel_name=self.target.currentText(),
-            reference_channel_name=self.reference.currentText(),
+            channel_name=self.channel_key(self.target),
+            reference_channel_name=self.channel_key(self.reference),
         )
         settings = copy.deepcopy(self.settings)
         channels = self.channels
@@ -664,6 +797,7 @@ class MainWindow(W.QMainWindow):
                     if k not in {
                         "training_labels_by_channel", "sorting_methods_by_channel",
                         "detection_labels_by_channel",
+                        "channel_names",
                     }
                 },
             ),
@@ -707,9 +841,12 @@ class MainWindow(W.QMainWindow):
             recording=self.recording_path,
             segment=self.recording_segment,
             markers=self.markers,
+            animal_id=self.animal_id.text().strip(),
+            channel_names=copy.deepcopy(self.settings.get("channel_names", {})),
         )
         self.project_path = (
-            Path(self.output.text()).expanduser().resolve() / "review.lobsort"
+            Path(self.output.text()).expanduser().resolve()
+            / (file_stem(self.animal_id.text()) + ".lobsort" if self.animal_id.text().strip() else "review.lobsort")
         )
         self.viewer.set_review(self.review)
         self.changed()
@@ -791,16 +928,18 @@ class MainWindow(W.QMainWindow):
         )
         if not path:
             return
+        named_channels = {self.review.channel_name(source): source for source in self.review.processed}
         channel, ok = W.QInputDialog.getItem(
             self,
             "Spike channel",
             "Channel for this CSV",
-            list(self.review.processed),
+            list(named_channels),
             0,
             False,
         )
         if not ok:
             return
+        channel = named_channels[channel]
         try:
             df = pd.read_csv(path)
             t = self.review.processed[channel]["time"]
@@ -838,7 +977,7 @@ class MainWindow(W.QMainWindow):
                 ).drop_duplicates("sample_index", keep="last")
             self.review.set_table(channel, df)
             self.viewer.set_review(self.review)
-            self.viewer.channel.setCurrentText(channel)
+            self.viewer.select_channel(channel)
             self.changed()
             self.tabs.setCurrentWidget(self.viewer)
         except Exception:
@@ -880,7 +1019,7 @@ class MainWindow(W.QMainWindow):
         ] = self.session.serializable_settings()
         self.review.set_table(target, table)
         self.viewer.set_review(self.review)
-        self.viewer.channel.setCurrentText(target)
+        self.viewer.select_channel(target)
         self.changed()
         self.tabs.setCurrentWidget(self.viewer)
         if table.acceptance_reason.eq("detection_only").all():
@@ -933,12 +1072,19 @@ class MainWindow(W.QMainWindow):
             ):
                 if key in saved:
                     self.settings[key] = copy.deepcopy(saved[key])
+                "channel_names",
+            ):
+                if key in saved:
+                    self.settings[key] = copy.deepcopy(saved[key])
+            self.settings["channel_names"] = copy.deepcopy(self.review.metadata.get("channel_names", saved.get("channel_names", {})))
+            self.animal_id.setText(self.review.metadata.get("animal_id", ""))
             self.refresh_channel_options()
             self.project_path = Path(path)
             self.session = None
             self.channels = []
             self.markers = self.review.metadata.get("markers", [])
             self.viewer.set_review(self.review)
+            self.update_channel_names()
             self.dirty = False
             self.tabs.setCurrentWidget(self.viewer)
             self.update_buttons()
@@ -949,14 +1095,17 @@ class MainWindow(W.QMainWindow):
         if not self.review:
             return
         folder = W.QFileDialog.getExistingDirectory(
-            self, "Export curated spike CSVs", self.output.text()
+            self,
+            f"Choose parent folder for {file_stem(self.animal_id.text())}" if self.animal_id.text().strip() else "Export curated spike CSVs",
+            self.output.text(),
         )
         if folder:
             try:
-                self.review.export(folder)
-                self.review.save(Path(folder) / "review.lobsort")
+                exported = self.review.export(folder)
+                details = exported / "review_details" if self.review.metadata.get("animal_id", "").strip() else exported
+                self.review.save(details / "review.lobsort")
                 self.statusBar().showMessage(
-                    f"Exported curated spikes and review to {folder}", 10000
+                    f"Exported curated spikes and review to {exported}", 10000
                 )
             except Exception:
                 self.failed(traceback.format_exc())
@@ -986,11 +1135,22 @@ class MainWindow(W.QMainWindow):
                 settings = default_settings()
                 loaded = json.loads(Path(path).read_text())
                 settings.update({k: v for k, v in loaded.items() if k in settings})
+                if "channel_names" not in loaded:
+                    settings["channel_names"] = copy.deepcopy(self.settings.get("channel_names", {}))
                 dialog = SettingsDialog(settings, self)
                 if dialog.exec():
                     self.close_labeler()
                     self.settings = dialog.settings
                     self.refresh_channel_options()
+                    sources = [c["name"] for c in self.channels] or list(self.review.processed if self.review else [])
+                    if sources:
+                        validate_channel_names(sources, dialog.settings.get("channel_names", {}))
+                    self.close_labeler()
+                    self.settings = dialog.settings
+                    self.refresh_channel_options()
+                    if self.review:
+                        self.review.metadata["channel_names"] = copy.deepcopy(self.settings.get("channel_names", {}))
+                    self.update_channel_names()
                     self.preprocessing.set_recording(self.channels, self.settings)
                     self.invalidate()
             except Exception:
@@ -1009,8 +1169,8 @@ class MainWindow(W.QMainWindow):
             threshold_factor=4.0,
             shadow_period_ms=2.0,
         )
-        self.target.setCurrentText("Red")
-        self.reference.setCurrentText("Green")
+        self.select_channel(self.target, "Red")
+        self.select_channel(self.reference, "Green")
         self.preprocessing.set_recording(self.channels, self.settings)
         self.append_log("Synthetic demo loaded. No biological data are included.")
 

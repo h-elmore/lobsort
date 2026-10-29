@@ -8,7 +8,7 @@ class CandidateLabeler(QtWidgets.QMainWindow):
         self.order_position = 0
         self.current_candidate_position = None
         self.history = []
-        self.setWindowTitle(f"{channel_name}: candidate labeling")
+        self.setWindowTitle(f"{display_channel_name}: candidate labeling")
         self.resize(1450, 950)
         self.build_interface()
         self.install_shortcuts()
@@ -28,8 +28,8 @@ class CandidateLabeler(QtWidgets.QMainWindow):
         self.plot_splitter = QtWidgets.QSplitter(vertical_orientation)
         self.plot = pg.PlotWidget()
         self.plot.showGrid(x=True, y=True, alpha=0.2)
-        self.plot.setLabel("left", f"{channel_name} filtered voltage")
-        self.plot.setTitle(f"Candidate channel: {channel_name}")
+        self.plot.setLabel("left", f"{display_channel_name} filtered voltage")
+        self.plot.setTitle(f"Candidate channel: {display_channel_name}")
         self.plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.plot.getAxis("left").enableAutoSIPrefix(False)
         self.plot_splitter.addWidget(self.plot)
@@ -38,9 +38,9 @@ class CandidateLabeler(QtWidgets.QMainWindow):
             self.reference_plot.showGrid(x=True, y=True, alpha=0.2)
             self.reference_plot.setLabel("bottom", "Time (seconds)")
             self.reference_plot.setLabel(
-                "left", f"{reference_channel_name} {reference_signal_key}"
+                "left", f"{display_reference_channel_name} {reference_signal_key}"
             )
-            self.reference_plot.setTitle(f"Reference channel: {reference_channel_name}")
+            self.reference_plot.setTitle(f"Reference channel: {display_reference_channel_name}")
             self.reference_plot.setXLink(self.plot)
             self.reference_plot.getAxis("bottom").enableAutoSIPrefix(False)
             self.reference_plot.getAxis("left").enableAutoSIPrefix(False)
@@ -228,7 +228,7 @@ class CandidateLabeler(QtWidgets.QMainWindow):
         if reference_channel_name is None:
             reference_text = ""
         else:
-            reference_text = f" | Reference: {reference_channel_name}"
+            reference_text = f" | Reference: {display_reference_channel_name}"
         self.status_label.setText(
             f"Candidate at {spike_time:.6f} s | SNR={candidate_snr[position]:.2f}{reference_text} | {count_text}"
         )
@@ -279,3 +279,4 @@ class CandidateLabeler(QtWidgets.QMainWindow):
 
     def save_labels(self, *_):
         manual_labels_df.to_csv(training_labels_path, index=False)
+

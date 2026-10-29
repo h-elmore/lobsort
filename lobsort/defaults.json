@@ -71,4 +71,6 @@
   "training_labels_by_channel": {},
   "sorting_methods_by_channel": {},
   "detection_labels_by_channel": {}
+  "detection_labels_by_channel": {},
+  "channel_names": {}
 }

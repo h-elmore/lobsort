@@ -26,7 +26,7 @@ Use **File → Open demo recording** to try the interface with deterministic syn
 ## Sort a recording
 
 1. Choose an `.smr` or `.abf` file and click **Load recording**. Choose a segment if the recording has multiple segments; numbering starts at zero. Neo must support the particular recording format/version. SMRX files require a separate CED reader and are not supported in this release.
-2. Choose the target channel, rhythm reference channel, and project folder. Preview all channels in **Review and refine**.
+2. Enter the **Animal ID** and use **Name channels…** to assign nerve names such as pdn and lvn. Choose the target channel, rhythm reference channel, and project folder. Preview all channels in **Review and refine**.
 3. Open **Adjust pipeline settings**. Set each channel's artifact cutoff in **mV**, bandpass limits, detection threshold, polarity, and shadow period. Set neuron names and desired example counts under **Training**. Defaults are starting points from the notebook, not universal physiological settings.
 4. Click **Filter and detect candidates**. Filtering runs for the target and reference channels. Masked artifacts appear as gaps in the filtered trace.
 5. Click **Label training examples**. The original time/amplitude-stratified labeling window presents candidates alongside the reference trace. Use the labeled buttons or number keys, **S** to skip, and **U** to undo. Labels save immediately. You can import a compatible training-label CSV instead.
@@ -39,6 +39,7 @@ Label examples across the recording and include noise. At least three examples p
 
 ## Correct spikes by hand
 
+- Open **Channels…** in **Review and refine** and check only the nerves you want to see. **Hide all** followed by checking a few nerves is useful for large recordings; **Show all** restores the full view. Hidden plots collapse so the remaining traces have more space. You can collapse the checklist again to give the traces still more space.
 - Browse with the time slider, mouse wheel, left/right keys, **Play**, or previous/next spike buttons. Use **Ctrl + wheel** or the window-length control to zoom in time. Switch between raw and filtered traces; use Y zoom for voltage scaling.
 - Choose the **edit channel** and a **neuron label**.
 - **Add / restore spike:** click a missed event or rejected marker. A new event snaps to the local peak according to detection polarity within the chosen snap radius. A radius of zero selects the nearest sample. Adding does not require an existing detected candidate.
@@ -48,15 +49,29 @@ Label examples across the recording and include noise. At least three examples p
 
 Zoom to individual events before editing densely packed spikes. Adds in filtered artifact gaps are blocked; revise filtering to recover events excluded by artifact settings. Automatic decisions are preserved in `automatic_label` and `automatic_accepted`; manual decisions use `manual_label`, `accepted_as_spike`, and `edit_source`.
 
+Visibility choices are saved in the review and survive renaming or refreshing the plots. Hidden channels retain all signals, spike decisions, and exports, and are skipped during plot redraws. The edit-channel selector lists visible nerves. Hiding the editing channel selects another visible nerve; hiding all channels pauses playback and shows an empty-view message. A newly classified channel is shown when its results are selected for review. Older reviews start with all channels visible.
+
 ## Save, resume, and export
 
 **File → Save review** writes a `.lobsort` project containing raw/filtered signals, artifact masks, candidate decisions, metadata, channel settings, event markers, and edit history. The file is self-contained and can be reopened without the original recording. Saves replace the project atomically. Save periodically during final review; final edits are not automatically saved after each click. Training labels save separately as you label.
 
-**File → Export curated spikes** writes, for each reviewed channel:
+**File → Export curated spikes** asks for a parent folder. If an animal ID is provided, it creates an animal-named subfolder with one CSV per sorted nerve:
 
-- `*_curated_spikes.csv`: accepted spikes, sorted by time, with `spike_number`, `time_seconds`, `sample_index`, `channel`, and `manual_label`.
-- `*_all_candidates.csv`: accepted and rejected candidates, original predictions/confidences, and manual provenance.
-- `edit_history.json`, `settings.json`, and a complete `review.lobsort` snapshot.
+```text
+1001_41/
+  pdn.csv
+  lvn.csv
+  review_details/
+    pdn_all_candidates.csv
+    lvn_all_candidates.csv
+    edit_history.json
+    settings.json
+    review.lobsort
+```
+
+The nerve CSVs contain accepted spikes, sorted by time, with `spike_number`, `time_seconds`, `sample_index`, `channel` (the nerve name), `source_channel` (the recorded identifier), `animal_id`, and `manual_label` (the neuron, such as PD). The details folder retains accepted and rejected candidates, available model predictions, manual provenance, settings, and a complete review snapshot. Only sorted/reviewed channels produce CSVs; merely displaying a rhythm reference does not sort it.
+
+Without an animal ID, the previous flat export layout remains available: indexed `*_curated_spikes.csv`, `*_all_candidates.csv`, and the review files in the selected folder.
 
 Exports honor manual overrides, including manually added spikes with no classifier confidence. Empty accepted tables still export column headers. Spike times are absolute recording seconds; indices are zero-based within the selected segment/channel.
 
@@ -153,3 +168,34 @@ method does not require rerunning detection, and these choices do not change
 the candidate workspace path. Switching channels restores each channel's
 checkboxes, sorting method, and detected-unit label. Settings profiles and saved
 reviews preserve these choices alongside the complete label library.
+
+
+### Animal IDs and nerve names
+
+You can enter the animal ID before or after loading a recording. After loading,
+click **Name channels…** beside **Load recording** to map recorded names such as
+Red and Green to nerve names such as pdn and lvn. Names must be nonempty and unique
+(ignoring capitalization). They appear in Setup, preprocessing, labeling, review,
+and CSV import/export. A settings profile can retain the channel-name mapping;
+older profiles without names preserve the currently assigned names. Animal IDs
+are recording metadata, rather than filtering-profile parameters.
+
+Renaming uses display aliases: the original signal keys remain stable. Existing
+candidate sessions, voltage cutoffs, per-channel label choices, training examples,
+review decisions, undo history, and raw recordings are retained. Naming a channel
+pdn does not assign the neuron label PD automatically; choose the neuron label in
+the usual sorting controls.
+
+Animal IDs and nerve names are stored in saved reviews and restored on reopen.
+**Name channels…** also works on a saved review. After reviewing spikes, export
+them with **File → Export curated spikes…**. Select the parent destination;
+Lobsort creates the animal-named folder itself and reports its location. Unsafe
+filename characters are replaced, and filename collisions receive numeric
+suffixes; the chosen names and original identifiers remain in the CSVs and the
+export manifest inside `review_details/settings.json`.
+
+Re-exporting the same recording updates its nerve CSVs and can add newly sorted
+nerves. To preserve previous results, exporting another recording/segment under
+the same animal ID, or changing an already exported nerve filename, requires a
+different parent destination. Spike times stay in seconds on the original
+recording timeline; naming does not shift times or combine separate recordings.
