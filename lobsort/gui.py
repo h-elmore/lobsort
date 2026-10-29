@@ -168,7 +168,7 @@ class SettingsDialog(W.QDialog):
                         "isi_filtered_label": "Neuron for burst checks / transferred waveform model",
                         "include_moderate_probability_spikes": "Include sequence-supported moderate confidence spikes",
                         "artifact_thresholds_mV": "Artifact cutoffs by channel (mV)",
-                        "label_targets": "Training labels and example counts",
+                        "label_targets": "Saved labels and example counts",
                     }.get(
                         key, key.replace("_", " ").replace("mV", "(mV)").capitalize()
                     ),
@@ -240,7 +240,7 @@ class SettingsDialog(W.QDialog):
                     "Noise scale bounds must be two increasing positive numbers, e.g. [0.25, 4]."
                 )
             if not s["label_targets"]:
-                raise ValueError("Define at least two training labels.")
+                raise ValueError("Define at least one label in the saved library.")
             self.accept()
         except Exception as exc:
             W.QMessageBox.warning(self, "Check settings", str(exc))
@@ -329,7 +329,7 @@ class MainWindow(W.QMainWindow):
         f.addRow(row)
         self.target.currentTextChanged.connect(self.invalidate)
         self.reference.currentTextChanged.connect(self.invalidate)
-        training = W.QGroupBox("Training or reuse")
+        training = W.QGroupBox("Sorting method and training")
         f = W.QFormLayout(training)
         layout.addWidget(training)
         row = W.QHBoxLayout()
@@ -337,13 +337,26 @@ class MainWindow(W.QMainWindow):
         self.labels_button.clicked.connect(self.open_labeler)
         row.addWidget(self.labels_button)
         self.kind = W.QComboBox()
-        self.kind.addItems(["Context-aware classifier", "Waveform classifier"])
+        self.kind.addItems([
+            "Context-aware classifier", "Waveform classifier", "Detection only (single unit)"
+        ])
         row.addWidget(self.kind)
         self.train_button = W.QPushButton("3. Train and classify")
         self.train_button.setObjectName("primary")
         self.train_button.clicked.connect(self.train)
         row.addWidget(self.train_button)
         f.addRow(row)
+        self.detection_label = W.QComboBox()
+        f.addRow("Detected unit label", self.detection_label)
+        self.training_labels_group = W.QWidget()
+        self.training_labels_group.setStyleSheet("QCheckBox:disabled { color:#68768b; }")
+        self.training_labels_layout = W.QGridLayout(self.training_labels_group)
+        self.training_labels_layout.setContentsMargins(0, 0, 0, 0)
+        self.training_label_checks = {}
+        f.addRow("Training labels for this channel", self.training_labels_group)
+        self.method_hint = W.QLabel()
+        self.method_hint.setWordWrap(True)
+        f.addRow(self.method_hint)
         row = W.QHBoxLayout()
         self.import_labels_button = W.QPushButton("Import training labels…")
         self.import_labels_button.clicked.connect(self.import_labels)
@@ -401,11 +414,82 @@ class MainWindow(W.QMainWindow):
                 "Use the time slider, scroll wheel, arrow keys, or Play to browse. Choose Add / restore spike, Deselect spike, or Relabel spike. Select the edit channel and neuron label, then click its trace. Add snaps to the strongest local peak within the selected radius. Set the radius to 0 to place at the nearest sample. Rejected candidates remain visible as gray crosses. Undo/redo work within the current session. Save a review to preserve all decisions. Export writes accepted spike CSVs and all candidate CSVs with edit history.",
             ),
         )
-        self.update_buttons()
+        self.target.currentTextChanged.connect(self.refresh_channel_options)
+        self.kind.currentIndexChanged.connect(self.channel_options_changed)
+        self.detection_label.currentTextChanged.connect(self.channel_options_changed)
+        self.refresh_channel_options()
 
     def append_log(self, text):
         if text.strip():
             self.log.appendPlainText(text.strip())
+
+    def refresh_channel_options(self, *_):
+        """Restore channel choices without changing the saved label library."""
+        target = self.target.currentText()
+        library = self.settings["label_targets"]
+        selected = self.settings.get("training_labels_by_channel", {}).get(
+            target, list(library)
+        )
+        if target in self.settings.get("training_labels_by_channel", {}):
+            # Removing or renaming a saved label must not leave a hidden active class.
+            selected = [label for label in library if label in selected]
+            self.settings["training_labels_by_channel"][target] = selected
+        while self.training_labels_layout.count():
+            item = self.training_labels_layout.takeAt(0)
+            item.widget().deleteLater()
+        self.training_label_checks = {}
+        for i, (label, count) in enumerate(library.items()):
+            check = W.QCheckBox(f"{label} ({count} examples)")
+            check.setChecked(label in selected)
+            check.toggled.connect(self.channel_options_changed)
+            self.training_labels_layout.addWidget(check, i // 4, i % 4)
+            self.training_label_checks[label] = check
+        self.kind.blockSignals(True)
+        methods = ["context", "waveform", "detection_only"]
+        method = self.settings.get("sorting_methods_by_channel", {}).get(target, "context")
+        self.kind.setCurrentIndex(methods.index(method) if method in methods else 0)
+        self.kind.blockSignals(False)
+        self.detection_label.blockSignals(True)
+        self.detection_label.clear()
+        self.detection_label.addItems([
+            label for label in library
+            if label.strip().lower() not in {"noise", "uncertain", "unlabeled", "nan"}
+        ])
+        label = self.settings.get("detection_labels_by_channel", {}).get(target, "PD")
+        if self.detection_label.findText(label) >= 0:
+            self.detection_label.setCurrentText(label)
+        self.detection_label.blockSignals(False)
+        self.update_buttons()
+
+    def selected_training_labels(self):
+        return [label for label, check in self.training_label_checks.items() if check.isChecked()]
+
+    def channel_options_changed(self, *_):
+        self.close_labeler()
+        target = self.target.currentText()
+        if target:
+            self.settings.setdefault("training_labels_by_channel", {})[target] = self.selected_training_labels()
+            self.settings.setdefault("sorting_methods_by_channel", {})[target] = [
+                "context", "waveform", "detection_only"
+            ][self.kind.currentIndex()]
+            self.settings.setdefault("detection_labels_by_channel", {})[target] = self.detection_label.currentText()
+            self.sync_session_options()
+            if self.review:
+                self.review.metadata.setdefault("settings", {}).update({
+                    key: copy.deepcopy(self.settings[key]) for key in (
+                        "training_labels_by_channel", "sorting_methods_by_channel", "detection_labels_by_channel"
+                    )
+                })
+                self.changed()
+        self.update_buttons()
+
+    def sync_session_options(self):
+        if self.session:
+            for key in (
+                "label_targets", "training_labels_by_channel",
+                "sorting_methods_by_channel", "detection_labels_by_channel",
+            ):
+                self.session.settings[key] = copy.deepcopy(self.settings.get(key, {}))
 
     def invalidate(self, *_):
         self.session = None
@@ -413,6 +497,7 @@ class MainWindow(W.QMainWindow):
 
     def update_buttons(self):
         busy = bool(self.worker and self.worker.isRunning())
+        detection_only = self.kind.currentIndex() == 2
         for w in [
             self.load,
             self.browse,
@@ -422,18 +507,28 @@ class MainWindow(W.QMainWindow):
             self.output,
             self.path,
             self.segment,
+            self.kind,
         ]:
             w.setEnabled(not busy)
         self.preprocessing.setEnabled(bool(self.channels) and not busy)
         self.preview_button.setEnabled(bool(self.channels) and not busy)
         self.prepare_button.setEnabled(bool(self.channels) and not busy)
-        for w in [
-            self.labels_button,
-            self.train_button,
-            self.transfer_button,
-            self.import_labels_button,
-        ]:
-            w.setEnabled(self.session is not None and not busy)
+        ready = self.session is not None and not busy
+        selected_count = len(self.selected_training_labels())
+        self.training_labels_group.setEnabled(not busy and not detection_only)
+        self.detection_label.setEnabled(not busy and detection_only)
+        self.labels_button.setEnabled(ready and not detection_only and selected_count > 0)
+        self.train_button.setEnabled(ready and (
+            bool(self.detection_label.currentText()) if detection_only else selected_count >= 2
+        ))
+        self.transfer_button.setEnabled(ready and not detection_only)
+        self.import_labels_button.setEnabled(ready and not detection_only)
+        self.train_button.setText("2. Accept detections as spikes" if detection_only else "3. Train and classify")
+        self.method_hint.setText(
+            "Every filtered detection is accepted with the chosen unit label. No training or classifier is needed; review and export as usual."
+            if detection_only else
+            "Check the labels you want to collect and train on for this channel. Other saved examples are kept. Classifiers need at least two selected classes, including Noise if appropriate."
+        )
         self.viewer.setEnabled(not busy)
         self.progress.setVisible(busy)
         self.progress.setRange(0, 0 if busy else 100)
@@ -544,7 +639,9 @@ class MainWindow(W.QMainWindow):
     def configure_settings(self):
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec():
+            self.close_labeler()
             self.settings = dialog.settings
+            self.refresh_channel_options()
             self.preprocessing.set_recording(self.channels, self.settings)
             self.invalidate()
 
@@ -562,7 +659,13 @@ class MainWindow(W.QMainWindow):
             dict(
                 path=self.recording_path,
                 segment=self.recording_segment,
-                settings=settings,
+                settings={
+                    k: v for k, v in settings.items()
+                    if k not in {
+                        "training_labels_by_channel", "sorting_methods_by_channel",
+                        "detection_labels_by_channel",
+                    }
+                },
             ),
             sort_keys=True,
         )
@@ -611,7 +714,7 @@ class MainWindow(W.QMainWindow):
         self.viewer.set_review(self.review)
         self.changed()
         self.append_log(
-            "Candidates ready. Label examples, reuse a model, or review candidates manually."
+            "Candidates ready. Choose Detection only to accept a single unit, label examples, reuse a model, or review manually."
         )
         self.update_buttons()
 
@@ -619,6 +722,8 @@ class MainWindow(W.QMainWindow):
         if not self.session:
             return
         try:
+            self.close_labeler()
+            self.sync_session_options()
             self.label_window = self.session.labeler()
             self.label_window.show()
         except Exception:
@@ -742,8 +847,13 @@ class MainWindow(W.QMainWindow):
     def train(self):
         if self.session:
             self.close_labeler()
-            kind = "context" if self.kind.currentIndex() == 0 else "waveform"
-            self.run(lambda: self.session.train(kind), self.classified)
+            self.sync_session_options()
+            if self.kind.currentIndex() == 2:
+                label = self.detection_label.currentText()
+                self.run(lambda: self.session.accept_candidates(label), self.classified)
+            else:
+                kind = "context" if self.kind.currentIndex() == 0 else "waveform"
+                self.run(lambda: self.session.train(kind), self.classified)
 
     def transfer(self):
         if not self.session:
@@ -773,9 +883,10 @@ class MainWindow(W.QMainWindow):
         self.viewer.channel.setCurrentText(target)
         self.changed()
         self.tabs.setCurrentWidget(self.viewer)
-        self.append_log(
-            "Classification finished. Review and refine spikes, then export curated results."
-        )
+        if table.acceptance_reason.eq("detection_only").all():
+            self.append_log("Detected candidates accepted as spikes. Review and refine, then export curated results.")
+        else:
+            self.append_log("Classification finished. Review and refine spikes, then export curated results.")
 
     def changed(self):
         self.dirty = True
@@ -815,6 +926,14 @@ class MainWindow(W.QMainWindow):
         try:
             self.close_labeler()
             self.review = Review.load(path)
+            saved = self.review.metadata.get("settings", {})
+            for key in (
+                "label_targets", "training_labels_by_channel",
+                "sorting_methods_by_channel", "detection_labels_by_channel",
+            ):
+                if key in saved:
+                    self.settings[key] = copy.deepcopy(saved[key])
+            self.refresh_channel_options()
             self.project_path = Path(path)
             self.session = None
             self.channels = []
@@ -869,7 +988,9 @@ class MainWindow(W.QMainWindow):
                 settings.update({k: v for k, v in loaded.items() if k in settings})
                 dialog = SettingsDialog(settings, self)
                 if dialog.exec():
+                    self.close_labeler()
                     self.settings = dialog.settings
+                    self.refresh_channel_options()
                     self.preprocessing.set_recording(self.channels, self.settings)
                     self.invalidate()
             except Exception:

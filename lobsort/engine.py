@@ -285,8 +285,43 @@ class PipelineSession:
         import pyqtgraph as pg
 
         self.ns.update(QtCore=QtCore, QtWidgets=QtWidgets, QtGui=QtGui, pg=pg)
-        self.run("labeler")
+        self.run("labeler", {"label_targets": self.training_targets()})
         return self.ns["CandidateLabeler"]()
+
+    def training_targets(self):
+        """Keep the label library intact while selecting classes per channel."""
+        available = self.settings["label_targets"]
+        selected = self.settings.get("training_labels_by_channel", {}).get(
+            self.settings["channel_name"], list(available)
+        )
+        if not selected:
+            raise ValueError("Select at least one training label for this channel.")
+        unknown = set(selected) - set(available)
+        if unknown:
+            raise ValueError(f"Unknown training labels: {sorted(unknown)}")
+        return {label: count for label, count in available.items() if label in selected}
+
+    def accept_candidates(self, label):
+        """Accept detector peaks as one unit without fitting a classifier."""
+        label = canonical_label(label)
+        if label not in self.settings["label_targets"] or label.lower() in {
+            "noise", "uncertain", "unlabeled", "nan",
+        }:
+            raise ValueError("Choose a neuron label from the saved label library.")
+        if "candidate_result" not in self.ns:
+            raise ValueError("Filter and detect candidates before accepting spikes.")
+        df = self.ns["candidate_result"]["spikes_df"].copy()
+        df["manual_label"] = label
+        df["accepted_as_spike"] = True
+        df["acceptance_reason"] = "detection_only"
+        df["channel"] = self.settings["channel_name"]
+        # No classifier probabilities or waveform-boundary exclusions are invented.
+        df.to_csv(self.output_dir / "automatic_candidates.csv", index=False)
+        target = self.settings["channel_name"]
+        self.settings.setdefault("sorting_methods_by_channel", {})[target] = "detection_only"
+        self.settings.setdefault("detection_labels_by_channel", {})[target] = label
+        self.log(f"Accepted {len(df)} detected candidates as {label}; no classifier used.")
+        return df
 
     def features(self):
         self.run(
@@ -298,16 +333,19 @@ class PipelineSession:
         )
 
     def train(self, kind="context"):
+        targets = self.training_targets()
         df = pd.read_csv(self.ns["training_labels_path"])
         df["manual_label"] = df["manual_label"].map(canonical_label)
+        # Preserve all saved examples even when a class is toggled off.
+        df.to_csv(self.ns["training_labels_path"], index=False)
+        df = df.loc[df.manual_label.isin(targets)].copy()
         if df.manual_label.nunique() < 2 or df.manual_label.value_counts().min() < 3:
             raise ValueError(
-                "Label at least three examples in each of at least two classes. More examples across the recording improve validation."
+                "Label at least three examples in each of at least two selected classes. For a single unit, choose Detection only (single unit)."
             )
-        df.to_csv(self.ns["training_labels_path"], index=False)
         self.ns["manual_labels_df"] = df
         if kind == "waveform":
-            self.run("waveform_train")
+            self.run("waveform_train", {"label_targets": targets})
         else:
             self.features()
             self.run("context_train")
@@ -393,3 +431,4 @@ class PipelineSession:
         return {
             k: (str(v) if isinstance(v, Path) else v) for k, v in self.settings.items()
         }
+
