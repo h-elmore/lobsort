@@ -70,7 +70,6 @@
   "context_waveform_after_ms": 5.0,
   "training_labels_by_channel": {},
   "sorting_methods_by_channel": {},
-  "detection_labels_by_channel": {}
   "detection_labels_by_channel": {},
   "channel_names": {}
 }
