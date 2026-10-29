@@ -116,3 +116,40 @@ filter artifacts. Large recordings can take time and additional memory; the late
 draft is displayed only when its calculation finishes. Invalid settings or excessive
 artifact exclusion show an inline explanation and cannot be applied. No pipeline
 output files are written by previewing.
+
+### Single-unit channels: accept detections without a classifier
+
+For a channel such as the pdn where all detected spikes belong to PD, choose
+**Detection only (single unit)** in the sorting-method dropdown under
+**Sorting method and training**. Set **Detected unit label** to **PD** (or another
+neuron from your saved label library). After **Filter and detect candidates**,
+click **Accept detections as spikes**. Every candidate produced by the current
+filtering and detection settings becomes an accepted spike under that label.
+No example labels, second class, waveform features, or classifier are required.
+The detection thresholds and artifact exclusions still apply; no additional
+classifier confidence or rhythm rules are applied.
+
+The accepted spikes open in the normal review tab, where you can remove false
+positives, add missed spikes, relabel, undo, save, and export. Detection-only
+results record `acceptance_reason=detection_only` and retain detector amplitude
+and noise measurements. They do not report classifier probabilities. Replacing
+a channel with manual edits retains the existing pre-classification snapshot
+behavior.
+
+### Keep a label library and choose labels per channel
+
+Keep all your neuron labels (for example **PD**, **LP**, **PY**, and **Noise**) and
+example counts in **Adjust pipeline settings → Training → Saved labels and
+example counts**. PD is included in the default library. In Setup, use the
+**Training labels for this channel** checkboxes to choose the labels to collect
+for the current channel. Only checked labels appear as buttons and keyboard
+shortcuts in **Label training examples**, and both classifiers train using those
+selected classes. Other previously saved examples remain on disk and become
+available again if you re-enable their labels.
+
+Classifiers still need examples from at least two selected classes. Single-unit
+channels can use Detection only instead. Changing the active labels or sorting
+method does not require rerunning detection, and these choices do not change
+the candidate workspace path. Switching channels restores each channel's
+checkboxes, sorting method, and detected-unit label. Settings profiles and saved
+reviews preserve these choices alongside the complete label library.

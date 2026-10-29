@@ -19,7 +19,8 @@
   "label_targets": {
     "PY": 25,
     "LP": 25,
-    "Noise": 25
+    "Noise": 25,
+    "PD": 25
   },
   "context_before_seconds": 5.0,
   "context_after_seconds": 5.0,
@@ -66,5 +67,8 @@
     4.0
   ],
   "context_waveform_before_ms": 5.0,
-  "context_waveform_after_ms": 5.0
+  "context_waveform_after_ms": 5.0,
+  "training_labels_by_channel": {},
+  "sorting_methods_by_channel": {},
+  "detection_labels_by_channel": {}
 }
