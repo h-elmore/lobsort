@@ -39,6 +39,7 @@ Label examples across the recording and include noise. At least three examples p
 
 ## Correct spikes by hand
 
+- Open **Channels…** in **Review and refine** and check only the nerves you want to see. **Hide all** followed by checking a few nerves is useful for large recordings; **Show all** restores the full view. Hidden plots collapse so the remaining traces have more space. You can collapse the checklist again to give the traces still more space.
 - Browse with the time slider, mouse wheel, left/right keys, **Play**, or previous/next spike buttons. Use **Ctrl + wheel** or the window-length control to zoom in time. Switch between raw and filtered traces; use Y zoom for voltage scaling.
 - Choose the **edit channel** and a **neuron label**.
 - **Add / restore spike:** click a missed event or rejected marker. A new event snaps to the local peak according to detection polarity within the chosen snap radius. A radius of zero selects the nearest sample. Adding does not require an existing detected candidate.
@@ -47,6 +48,8 @@ Label examples across the recording and include noise. At least three examples p
 - **Undo / Redo:** reverse or restore edits in the current session. The review keeps an audit history of edits. Undo stacks restart when reopening a project or replacing a channel table.
 
 Zoom to individual events before editing densely packed spikes. Adds in filtered artifact gaps are blocked; revise filtering to recover events excluded by artifact settings. Automatic decisions are preserved in `automatic_label` and `automatic_accepted`; manual decisions use `manual_label`, `accepted_as_spike`, and `edit_source`.
+
+Visibility choices are saved in the review and survive renaming or refreshing the plots. Hidden channels retain all signals, spike decisions, and exports, and are skipped during plot redraws. The edit-channel selector lists visible nerves. Hiding the editing channel selects another visible nerve; hiding all channels pauses playback and shows an empty-view message. A newly classified channel is shown when its results are selected for review. Older reviews start with all channels visible.
 
 ## Save, resume, and export
 

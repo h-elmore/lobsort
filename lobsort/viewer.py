@@ -37,6 +37,7 @@ class ReviewWidget(W.QWidget):
         super().__init__(parent)
         self.review = None
         self.plots = {}
+        self.channel_checks = {}
         self.syncing = False
         outer = W.QVBoxLayout(self)
         header = W.QLabel("Review & refine")
@@ -74,6 +75,35 @@ class ReviewWidget(W.QWidget):
             tools.addWidget(W.QLabel(title))
             tools.addWidget(widget)
         tools.addWidget(self.rejected)
+        visibility = W.QHBoxLayout()
+        outer.addLayout(visibility)
+        self.channels_toggle = W.QToolButton()
+        self.channels_toggle.setText("Channels…")
+        self.channels_toggle.setCheckable(True)
+        self.channels_toggle.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.channels_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        visibility.addWidget(self.channels_toggle)
+        self.channel_summary = W.QLabel("No channels loaded")
+        visibility.addWidget(self.channel_summary)
+        self.show_all = W.QPushButton("Show all")
+        self.hide_all = W.QPushButton("Hide all")
+        visibility.addWidget(self.show_all)
+        visibility.addWidget(self.hide_all)
+        visibility.addStretch()
+        self.channel_panel = W.QScrollArea()
+        self.channel_panel.setWidgetResizable(True)
+        self.channel_panel.setMaximumHeight(125)
+        self.channel_panel.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        choices = W.QWidget()
+        self.channel_grid = W.QGridLayout(choices)
+        self.channel_panel.setWidget(choices)
+        self.channel_panel.setVisible(False)
+        outer.addWidget(self.channel_panel)
+        self.channels_toggle.toggled.connect(self.toggle_channel_panel)
+        self.show_all.clicked.connect(lambda: self.set_all_channels(True))
+        self.hide_all.clicked.connect(lambda: self.set_all_channels(False))
+        for button in (self.channels_toggle, self.show_all, self.hide_all):
+            button.setEnabled(False)
         self.scroll = W.QScrollArea()
         self.scroll.setWidgetResizable(True)
         outer.addWidget(self.scroll, 1)
@@ -138,22 +168,30 @@ class ReviewWidget(W.QWidget):
     def set_review(self, review):
         self.timer.stop()
         self.play.setChecked(False)
+        edit_source = self.channel.currentData()
         self.review = review
         while self.plot_layout.count():
             item = self.plot_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self.plots = {}
-        self.channel.clear()
-        for source in review.processed:
-            self.channel.addItem(review.channel_name(source), source)
+        while self.channel_grid.count():
+            self.channel_grid.takeAt(0).widget().deleteLater()
+        self.channel_checks = {}
+        hidden = set(review.metadata.get("hidden_channels", []))
         self.first = min(float(d["time"][0]) for d in review.processed.values())
         self.last = max(float(d["time"][-1]) for d in review.processed.values())
         self.start.setRange(self.first, self.last)
         self.window.setMaximum(max(0.005, self.last - self.first))
         self.window.setValue(min(15, max(0.005, self.last - self.first)))
         self.start.setValue(self.first)
-        for name, data in review.processed.items():
+        for index, (name, data) in enumerate(review.processed.items()):
+            check = W.QCheckBox(review.channel_name(name))
+            check.setToolTip(f"{review.channel_name(name)} · recorded channel: {name}")
+            check.setChecked(name not in hidden)
+            check.toggled.connect(self.channel_visibility_changed)
+            self.channel_grid.addWidget(check, index // 4, index % 4)
+            self.channel_checks[name] = check
             plot = ScrollPlot()
             plot.setMinimumHeight(230)
             plot.setBackground("#141d2c")
@@ -169,7 +207,13 @@ class ReviewWidget(W.QWidget):
                 lambda event, n=name: self.clicked(n, event)
             )
             self.plot_layout.addWidget(plot)
+            plot.setVisible(name not in hidden)
             self.plots[name] = (plot, plot.plot(pen=pg.mkPen("#a7b6cc", width=1)))
+        self.empty_view = W.QLabel("No channels shown. Open Channels and check the nerves you want to view.")
+        self.empty_view.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.empty_view.setWordWrap(True)
+        self.plot_layout.addWidget(self.empty_view)
+        self.empty_view.setVisible(not self.visible_channels())
         labels = sorted(
             {
                 str(label)
@@ -180,6 +224,57 @@ class ReviewWidget(W.QWidget):
         )
         existing = {self.label.itemText(i) for i in range(self.label.count())}
         self.label.addItems([s for s in labels if s not in existing])
+        self.apply_channel_visibility(preferred=edit_source)
+
+    def toggle_channel_panel(self, expanded):
+        self.channel_panel.setVisible(expanded)
+        self.channels_toggle.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if expanded else QtCore.Qt.ArrowType.RightArrow
+        )
+
+    def visible_channels(self):
+        return [source for source, check in self.channel_checks.items() if check.isChecked()]
+
+    def set_all_channels(self, visible):
+        changed = False
+        for check in self.channel_checks.values():
+            changed |= check.isChecked() != visible
+            check.blockSignals(True)
+            check.setChecked(visible)
+            check.blockSignals(False)
+        if changed:
+            self.channel_visibility_changed()
+
+    def channel_visibility_changed(self, *_):
+        if not self.review:
+            return
+        shown = set(self.visible_channels())
+        self.review.metadata["hidden_channels"] = [source for source in self.review.processed if source not in shown]
+        self.apply_channel_visibility()
+        self.edited.emit()
+
+    def apply_channel_visibility(self, preferred=None):
+        visible = self.visible_channels()
+        preferred = preferred or self.channel.currentData()
+        self.channel.blockSignals(True)
+        self.channel.clear()
+        for source in visible:
+            self.channel.addItem(self.review.channel_name(source), source)
+        index = self.channel.findData(preferred)
+        if index >= 0:
+            self.channel.setCurrentIndex(index)
+        self.channel.blockSignals(False)
+        for source, (plot, _) in self.plots.items():
+            plot.setVisible(source in visible)
+        self.empty_view.setVisible(not visible)
+        for widget in (self.channel, self.mode, self.label, self.snap, self.play):
+            widget.setEnabled(bool(visible))
+        if not visible:
+            self.play.setChecked(False)
+        self.channels_toggle.setEnabled(bool(self.channel_checks))
+        self.show_all.setEnabled(len(visible) < len(self.channel_checks))
+        self.hide_all.setEnabled(bool(visible))
+        self.channel_summary.setText(f"{len(visible)} of {len(self.channel_checks)} channels shown")
         self.refresh()
 
     def update_channel_names(self):
@@ -191,10 +286,14 @@ class ReviewWidget(W.QWidget):
             self.channel.setItemText(index, self.review.channel_name(source))
         self.channel.blockSignals(False)
         for source, (plot, _) in self.plots.items():
+            self.channel_checks[source].setText(self.review.channel_name(source))
+            self.channel_checks[source].setToolTip(f"{self.review.channel_name(source)} · recorded channel: {source}")
             plot.setLabel("left", self.review.channel_name(source), units=self.review.processed[source].get("units", ""))
         self.refresh()
 
     def select_channel(self, source):
+        if source in self.channel_checks and not self.channel_checks[source].isChecked():
+            self.channel_checks[source].setChecked(True)
         index = self.channel.findData(source)
         if index >= 0:
             self.channel.setCurrentIndex(index)
@@ -253,6 +352,8 @@ class ReviewWidget(W.QWidget):
             label: COLORS[i % len(COLORS)] for i, label in enumerate(all_labels)
         }
         for name, (plot, trace) in self.plots.items():
+            if not self.channel_checks[name].isChecked():
+                continue
             data = self.review.processed[name]
             t = data["time"]
             values = data[
@@ -312,9 +413,12 @@ class ReviewWidget(W.QWidget):
                 + (" • editing" if name == self.channel.currentData() else ""),
                 color="#43d9ad" if name == self.channel.currentData() else "#b5c3d9",
             )
-        legend = "  ·  ".join(
-            f"{label}" for label in all_labels if label.lower() != "noise"
-        )
+        shown = set(self.visible_channels())
+        visible_labels = sorted({
+            str(label) for source, table in self.review.tables.items() if source in shown
+            for label in table.manual_label.unique() if str(label).lower() != "noise"
+        })
+        legend = "  ·  ".join(visible_labels)
         self.status.setText(
             f"{begin:.3f}–{end:.3f} s  |  {count} accepted spikes visible  |  {legend}"
         )
@@ -326,7 +430,7 @@ class ReviewWidget(W.QWidget):
             or event.button() != QtCore.Qt.MouseButton.LeftButton
         ):
             return
-        if name != self.channel.currentData():
+        if name != self.channel.currentData() or not self.channel_checks[name].isChecked():
             return
         plot = self.plots[name][0]
         if not plot.sceneBoundingRect().contains(event.scenePos()):
