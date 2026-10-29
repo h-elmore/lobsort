@@ -21,6 +21,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets as W
 import pyqtgraph as pg
 from .engine import PipelineSession, default_settings, load_recording
 from .curation import Review
+from .timing import reference_snapshot, EXCLUDED
 from .viewer import ReviewWidget, spin
 from .preprocessing_view import PreprocessingWidget
 from .recording_metadata import validate_channel_names, file_stem
@@ -62,12 +63,18 @@ class ChannelNamesDialog(W.QDialog):
         self.setWindowTitle("Name recording channels")
         self.resize(650, 430)
         layout = W.QVBoxLayout(self)
-        explanation = W.QLabel("Give each channel its nerve name, such as pdn or lvn. Original recording identifiers are retained.")
+        explanation = W.QLabel(
+            "Give each channel its nerve name, such as pdn or lvn. Original recording identifiers are retained."
+        )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         self.table = W.QTableWidget(len(sources), 2)
-        self.table.setHorizontalHeaderLabels(["Recorded channel", "Nerve / channel name"])
-        self.table.horizontalHeader().setSectionResizeMode(W.QHeaderView.ResizeMode.Stretch)
+        self.table.setHorizontalHeaderLabels(
+            ["Recorded channel", "Nerve / channel name"]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            W.QHeaderView.ResizeMode.Stretch
+        )
         for row, source in enumerate(sources):
             item = W.QTableWidgetItem(source)
             item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
@@ -77,7 +84,10 @@ class ChannelNamesDialog(W.QDialog):
         self.error = W.QLabel()
         self.error.setWordWrap(True)
         layout.addWidget(self.error)
-        buttons = W.QDialogButtonBox(W.QDialogButtonBox.StandardButton.Save | W.QDialogButtonBox.StandardButton.Cancel)
+        buttons = W.QDialogButtonBox(
+            W.QDialogButtonBox.StandardButton.Save
+            | W.QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(self.validate)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -85,7 +95,9 @@ class ChannelNamesDialog(W.QDialog):
     def validate(self):
         try:
             proposed = {
-                source: self.table.item(row, 1).text() if self.table.item(row, 1) else ""
+                source: (
+                    self.table.item(row, 1).text() if self.table.item(row, 1) else ""
+                )
                 for row, source in enumerate(self.sources)
             }
             self.names = validate_channel_names(self.sources, proposed)
@@ -99,7 +111,8 @@ class SettingsDialog(W.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Pipeline settings")
         self.resize(780, 760)
-        self.settings = copy.deepcopy(settings)
+        self.settings = {**default_settings(), **copy.deepcopy(settings)}
+        settings = self.settings
         self.widgets = {}
         layout = W.QVBoxLayout(self)
         layout.addWidget(
@@ -163,6 +176,8 @@ class SettingsDialog(W.QDialog):
                 "minimum_isi_tolerance_ms",
                 "apply_within_burst_isi_filter",
                 "include_moderate_probability_spikes",
+                "unit_timing_window_s",
+                "unit_timing_burst_gap_s",
             ],
         }
         for title, keys in groups.items():
@@ -184,7 +199,11 @@ class SettingsDialog(W.QDialog):
                     )
                     widget.setMinimumHeight(220)
                     for row, (k, v) in enumerate(value.items()):
-                        name = settings.get("channel_names", {}).get(k, k) if key == "artifact_thresholds_mV" else k
+                        name = (
+                            settings.get("channel_names", {}).get(k, k)
+                            if key == "artifact_thresholds_mV"
+                            else k
+                        )
                         item = W.QTableWidgetItem(name)
                         item.setData(QtCore.Qt.ItemDataRole.UserRole, k)
                         if name != k:
@@ -241,11 +260,18 @@ class SettingsDialog(W.QDialog):
                             name = k.text().strip()
                             if key == "artifact_thresholds_mV":
                                 source = k.data(QtCore.Qt.ItemDataRole.UserRole)
-                                original_display = self.settings.get("channel_names", {}).get(source, source)
+                                original_display = self.settings.get(
+                                    "channel_names", {}
+                                ).get(source, source)
                                 if source and name == original_display:
                                     name = source
                                 else:
-                                    aliases = {v: k for k, v in self.settings.get("channel_names", {}).items()}
+                                    aliases = {
+                                        v: k
+                                        for k, v in self.settings.get(
+                                            "channel_names", {}
+                                        ).items()
+                                    }
                                     name = aliases.get(name, name)
                             value[name] = (
                                 int(v.text())
@@ -270,6 +296,11 @@ class SettingsDialog(W.QDialog):
                     )
                 self.settings[key] = value
             s = self.settings
+            for key in ["unit_timing_window_s", "unit_timing_burst_gap_s"]:
+                if not np.isfinite(s[key]) or s[key] <= 0:
+                    raise ValueError(
+                        "Labeled-unit timing window and burst gap must be positive."
+                    )
             if s["filter_low_hz"] >= s["filter_high_hz"]:
                 raise ValueError(
                     "The lower filter cutoff must be below the upper cutoff."
@@ -320,7 +351,10 @@ class MainWindow(W.QMainWindow):
         setup = W.QWidget()
         layout = W.QVBoxLayout(setup)
         layout.setContentsMargins(28, 22, 28, 22)
-        self.tabs.addTab(setup, "1  Recording and sorting")
+        setup_scroll = W.QScrollArea()
+        setup_scroll.setWidgetResizable(True)
+        setup_scroll.setWidget(setup)
+        self.tabs.addTab(setup_scroll, "1  Recording and sorting")
         title = W.QLabel("Lobsort")
         title.setObjectName("title")
         layout.addWidget(title)
@@ -333,7 +367,9 @@ class MainWindow(W.QMainWindow):
         f = W.QFormLayout(recording)
         layout.addWidget(recording)
         self.animal_id = W.QLineEdit()
-        self.animal_id.setPlaceholderText("e.g. 1001_41 — used to name the export folder")
+        self.animal_id.setPlaceholderText(
+            "e.g. 1001_41 — used to name the export folder"
+        )
         self.animal_id.setMaxLength(120)
         self.animal_id.textChanged.connect(self.animal_id_changed)
         f.addRow("Animal ID", self.animal_id)
@@ -383,7 +419,9 @@ class MainWindow(W.QMainWindow):
         self.configure.clicked.connect(self.configure_settings)
         row.addWidget(self.configure)
         self.preview_button = W.QPushButton("Preview filtering on signal…")
-        self.preview_button.clicked.connect(lambda: self.tabs.setCurrentWidget(self.preprocessing))
+        self.preview_button.clicked.connect(
+            lambda: self.tabs.setCurrentWidget(self.preprocessing)
+        )
         row.addWidget(self.preview_button)
         self.prepare_button = W.QPushButton("1. Filter and detect candidates")
         self.prepare_button.setObjectName("primary")
@@ -400,9 +438,13 @@ class MainWindow(W.QMainWindow):
         self.labels_button.clicked.connect(self.open_labeler)
         row.addWidget(self.labels_button)
         self.kind = W.QComboBox()
-        self.kind.addItems([
-            "Context-aware classifier", "Waveform classifier", "Detection only (single unit)"
-        ])
+        self.kind.addItems(
+            [
+                "Context-aware classifier",
+                "Waveform classifier",
+                "Detection only (single unit)",
+            ]
+        )
         row.addWidget(self.kind)
         self.train_button = W.QPushButton("3. Train and classify")
         self.train_button.setObjectName("primary")
@@ -412,7 +454,9 @@ class MainWindow(W.QMainWindow):
         self.detection_label = W.QComboBox()
         f.addRow("Detected unit label", self.detection_label)
         self.training_labels_group = W.QWidget()
-        self.training_labels_group.setStyleSheet("QCheckBox:disabled { color:#68768b; }")
+        self.training_labels_group.setStyleSheet(
+            "QCheckBox:disabled { color:#68768b; }"
+        )
         self.training_labels_layout = W.QGridLayout(self.training_labels_group)
         self.training_labels_layout.setContentsMargins(0, 0, 0, 0)
         self.training_label_checks = {}
@@ -434,6 +478,71 @@ class MainWindow(W.QMainWindow):
                 "Training labels save as you work. Review remains available for manual sorting even without a classifier."
             )
         )
+        timing_box = W.QGroupBox("Learn timing from a labeled unit in this review")
+        timing_box.setCheckable(True)
+        timing_box.setChecked(False)
+        self.timing_group = timing_box
+        timing_layout = W.QFormLayout(timing_box)
+        self.timing_channel = W.QComboBox()
+        self.timing_unit = W.QComboBox()
+        row = W.QHBoxLayout()
+        row.addWidget(W.QLabel("Channel"))
+        row.addWidget(self.timing_channel, 1)
+        row.addWidget(W.QLabel("Unit"))
+        row.addWidget(self.timing_unit, 1)
+        self.timing_refresh = W.QPushButton("Refresh units")
+        self.timing_refresh.clicked.connect(self.refresh_timing_sources)
+        row.addWidget(self.timing_refresh)
+        timing_layout.addRow(row)
+        self.timing_hint = W.QLabel(
+            "Uses accepted spikes now, including unsaved edits. Reclassify after changing the reference."
+        )
+        self.timing_hint.setWordWrap(True)
+        timing_layout.addRow(self.timing_hint)
+        layout.addWidget(timing_box)
+        row = W.QHBoxLayout()
+        row.addWidget(W.QLabel("Context training speed"))
+        self.context_speed = W.QComboBox()
+        self.context_speed.addItem("Fast · 200 trees, 3 validation folds", "fast")
+        self.context_speed.addItem(
+            "Thorough · 500 trees, 5 validation folds", "thorough"
+        )
+        self.context_speed.addItem("Custom · use advanced training settings", "custom")
+        self.context_speed.setCurrentIndex(
+            max(
+                0,
+                self.context_speed.findData(
+                    self.settings.get("context_training_speed", "fast")
+                ),
+            )
+        )
+        self.context_speed.currentIndexChanged.connect(self.timing_options_changed)
+        row.addWidget(self.context_speed)
+        row.addStretch()
+        layout.addLayout(row)
+        row = W.QHBoxLayout()
+        row.addWidget(W.QLabel("Context acceptance"))
+        self.acceptance_choice = W.QComboBox()
+        self.acceptance_choice.addItem("High confidence only", False)
+        self.acceptance_choice.addItem(
+            "High + moderate confidence with sequence support", True
+        )
+        self.acceptance_choice.setCurrentIndex(
+            int(bool(self.settings["include_moderate_probability_spikes"]))
+        )
+        self.acceptance_choice.currentIndexChanged.connect(self.acceptance_changed)
+        row.addWidget(self.acceptance_choice, 1)
+        self.apply_acceptance_button = W.QPushButton("Apply to current channel review")
+        self.apply_acceptance_button.clicked.connect(self.apply_acceptance)
+        row.addWidget(self.apply_acceptance_button)
+        layout.addLayout(row)
+        self.acceptance_hint = W.QLabel()
+        self.acceptance_hint.setWordWrap(True)
+        layout.addWidget(self.acceptance_hint)
+        self.refresh_acceptance_hint()
+        self.timing_group.toggled.connect(self.timing_options_changed)
+        self.timing_channel.currentIndexChanged.connect(self.timing_channel_changed)
+        self.timing_unit.currentTextChanged.connect(self.timing_options_changed)
         self.log = W.QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setPlaceholderText(
@@ -449,6 +558,7 @@ class MainWindow(W.QMainWindow):
         self.viewer = ReviewWidget()
         self.tabs.addTab(self.viewer, "3  Review and refine")
         self.viewer.edited.connect(self.changed)
+        self.viewer.channel.currentIndexChanged.connect(self.update_buttons)
         self.viewer.message.connect(
             lambda text: W.QMessageBox.information(self, "Review", text)
         )
@@ -507,15 +617,21 @@ class MainWindow(W.QMainWindow):
             self.changed()
 
     def rename_channels(self):
-        sources = [c["name"] for c in self.channels] or list(self.review.processed if self.review else [])
+        sources = [c["name"] for c in self.channels] or list(
+            self.review.processed if self.review else []
+        )
         if not sources:
             return
-        dialog = ChannelNamesDialog(sources, self.settings.get("channel_names", {}), self)
+        dialog = ChannelNamesDialog(
+            sources, self.settings.get("channel_names", {}), self
+        )
         if dialog.exec():
             self.apply_channel_names(dialog.names)
 
     def apply_channel_names(self, names):
-        sources = [c["name"] for c in self.channels] or list(self.review.processed if self.review else [])
+        sources = [c["name"] for c in self.channels] or list(
+            self.review.processed if self.review else []
+        )
         names = validate_channel_names(sources, names)
         self.close_labeler()
         self.settings["channel_names"] = names
@@ -523,7 +639,9 @@ class MainWindow(W.QMainWindow):
             self.session.settings["channel_names"] = copy.deepcopy(names)
         if self.review:
             self.review.metadata["channel_names"] = copy.deepcopy(names)
-            self.review.metadata.setdefault("settings", {})["channel_names"] = copy.deepcopy(names)
+            self.review.metadata.setdefault("settings", {})["channel_names"] = (
+                copy.deepcopy(names)
+            )
         self.update_channel_names()
         self.changed()
 
@@ -562,50 +680,257 @@ class MainWindow(W.QMainWindow):
             self.training_label_checks[label] = check
         self.kind.blockSignals(True)
         methods = ["context", "waveform", "detection_only"]
-        method = self.settings.get("sorting_methods_by_channel", {}).get(target, "context")
+        method = self.settings.get("sorting_methods_by_channel", {}).get(
+            target, "context"
+        )
         self.kind.setCurrentIndex(methods.index(method) if method in methods else 0)
         self.kind.blockSignals(False)
         self.detection_label.blockSignals(True)
         self.detection_label.clear()
-        self.detection_label.addItems([
-            label for label in library
-            if label.strip().lower() not in {"noise", "uncertain", "unlabeled", "nan"}
-        ])
+        self.detection_label.addItems(
+            [
+                label
+                for label in library
+                if label.strip().lower()
+                not in {"noise", "uncertain", "unlabeled", "nan"}
+            ]
+        )
         label = self.settings.get("detection_labels_by_channel", {}).get(target, "PD")
         if self.detection_label.findText(label) >= 0:
             self.detection_label.setCurrentText(label)
         self.detection_label.blockSignals(False)
+        self.refresh_timing_sources()
         self.update_buttons()
 
+    def acceptance_channel(self):
+        if self.channels:
+            return self.channel_key(self.target)
+        return self.viewer.channel.currentData() if hasattr(self, "viewer") else None
+
+    def refresh_acceptance_hint(self):
+        if not hasattr(self, "acceptance_hint"):
+            return
+        s = self.settings
+        self.acceptance_hint.setText(
+            f"High: at least {s['high_confidence_probability']:.0%} classifier confidence. "
+            f"Moderate: at least {s['supported_probability']:.0%} plus {s['minimum_same_label_neighbors']} other same-label candidates "
+            f"within ±{s['sequence_support_window_s']:g} s. These thresholds apply when classifying; Apply switches existing recorded decisions without refitting. Manual edits are preserved."
+        )
+
+    def acceptance_changed(self, *_):
+        self.settings["include_moderate_probability_spikes"] = bool(
+            self.acceptance_choice.currentData()
+        )
+        self.sync_session_options()
+        if self.review:
+            self.review.metadata.setdefault("settings", {})[
+                "include_moderate_probability_spikes"
+            ] = self.settings["include_moderate_probability_spikes"]
+            self.changed()
+        self.refresh_acceptance_hint()
+
+    def apply_acceptance(self):
+        if not self.review:
+            return
+        channel = self.acceptance_channel()
+        try:
+            self.review.apply_confidence_policy(
+                channel, self.settings["include_moderate_probability_spikes"]
+            )
+            self.viewer.refresh()
+            self.changed()
+            self.append_log(
+                f"Updated {self.channel_name(channel)} acceptance without retraining; manual edits retained."
+            )
+        except ValueError as exc:
+            W.QMessageBox.information(self, "Context acceptance", str(exc))
+
+    def refresh_timing_sources(self, *_):
+        if not hasattr(self, "timing_group"):
+            return
+        target = self.channel_key(self.target)
+        chosen = self.settings.get("unit_timing_references_by_channel", {}).get(target)
+        channels = []
+        if self.review:
+            for channel, df in self.review.tables.items():
+                accepted = df.loc[df.accepted_as_spike, "manual_label"].astype(str)
+                if (
+                    channel != target
+                    and accepted.map(lambda x: x.strip().lower() not in EXCLUDED).any()
+                ):
+                    channels.append(channel)
+        if chosen and chosen["channel"] not in channels and chosen["channel"] != target:
+            channels.append(chosen["channel"])
+        self.timing_channel.blockSignals(True)
+        self.timing_channel.clear()
+        for channel in channels:
+            self.timing_channel.addItem(self.channel_name(channel), channel)
+        if chosen:
+            i = self.timing_channel.findData(chosen["channel"])
+            if i >= 0:
+                self.timing_channel.setCurrentIndex(i)
+        self.timing_channel.blockSignals(False)
+        self.populate_timing_units(chosen.get("label") if chosen else None)
+        self.timing_group.blockSignals(True)
+        self.timing_group.setChecked(bool(chosen))
+        self.timing_group.blockSignals(False)
+        self.context_speed.blockSignals(True)
+        self.context_speed.setCurrentIndex(
+            max(
+                0,
+                self.context_speed.findData(
+                    self.settings.get("context_training_speed", "fast")
+                ),
+            )
+        )
+        self.context_speed.blockSignals(False)
+        self.acceptance_choice.blockSignals(True)
+        self.acceptance_choice.setCurrentIndex(
+            int(bool(self.settings["include_moderate_probability_spikes"]))
+        )
+        self.acceptance_choice.blockSignals(False)
+        self.refresh_acceptance_hint()
+
+    def populate_timing_units(self, selected=None):
+        channel = self.timing_channel.currentData()
+        labels = []
+        if self.review and channel in self.review.tables:
+            df = self.review.tables[channel]
+            labels = sorted(
+                {
+                    str(x)
+                    for x in df.loc[df.accepted_as_spike, "manual_label"]
+                    if str(x).strip().lower() not in EXCLUDED
+                }
+            )
+        if selected and selected not in labels:
+            labels.append(selected)
+        self.timing_unit.blockSignals(True)
+        self.timing_unit.clear()
+        self.timing_unit.addItems(labels)
+        if selected:
+            self.timing_unit.setCurrentText(selected)
+        self.timing_unit.blockSignals(False)
+        self.update_timing_hint()
+
+    def update_timing_hint(self):
+        channel = self.timing_channel.currentData()
+        label = self.timing_unit.currentText()
+        count = 0
+        if self.review and channel in self.review.tables:
+            df = self.review.tables[channel]
+            count = int((df.accepted_as_spike & df.manual_label.eq(label)).sum())
+        self.timing_hint.setText(
+            f"{count:,} accepted reference spikes at last refresh. Uses current unsaved decisions when training. "
+            "Partial sorting gives provisional timing; reclassify after editing the reference. "
+            "With no selection, the legacy signal-envelope context is used."
+        )
+
+    def timing_channel_changed(self, *_):
+        self.populate_timing_units()
+        self.timing_options_changed()
+
+    def timing_options_changed(self, *_):
+        if not hasattr(self, "context_speed"):
+            return
+        target = self.channel_key(self.target)
+        choices = self.settings.setdefault("unit_timing_references_by_channel", {})
+        if target:
+            if self.timing_group.isChecked():
+                choices[target] = dict(
+                    channel=self.timing_channel.currentData(),
+                    label=self.timing_unit.currentText(),
+                )
+            else:
+                choices.pop(target, None)
+        self.settings["context_training_speed"] = (
+            self.context_speed.currentData() or "fast"
+        )
+        self.sync_session_options()
+        self.update_timing_hint()
+        if self.review:
+            self.review.metadata.setdefault("settings", {}).update(
+                {
+                    key: copy.deepcopy(self.settings[key])
+                    for key in [
+                        "unit_timing_references_by_channel",
+                        "context_training_speed",
+                    ]
+                }
+            )
+            self.changed()
+
+    def attach_timing_reference(self):
+        if not self.timing_group.isChecked():
+            self.session.set_timing_reference(None)
+            return
+        if not self.review:
+            raise ValueError("Open a review with a labeled reference unit first.")
+        snapshot = reference_snapshot(
+            self.review,
+            self.session.settings["channel_name"],
+            self.timing_channel.currentData(),
+            self.timing_unit.currentText(),
+        )
+        self.session.set_timing_reference(snapshot)
+        self.append_log(
+            f"Using current accepted {snapshot['label']} spikes on {self.channel_name(snapshot['channel'])} "
+            f"({snapshot['accepted_count']:,} spikes). No CSV export required."
+        )
+
     def selected_training_labels(self):
-        return [label for label, check in self.training_label_checks.items() if check.isChecked()]
+        return [
+            label
+            for label, check in self.training_label_checks.items()
+            if check.isChecked()
+        ]
 
     def channel_options_changed(self, *_):
         self.close_labeler()
         target = self.channel_key(self.target)
         if target:
-            self.settings.setdefault("training_labels_by_channel", {})[target] = self.selected_training_labels()
+            self.settings.setdefault("training_labels_by_channel", {})[
+                target
+            ] = self.selected_training_labels()
             self.settings.setdefault("sorting_methods_by_channel", {})[target] = [
-                "context", "waveform", "detection_only"
+                "context",
+                "waveform",
+                "detection_only",
             ][self.kind.currentIndex()]
-            self.settings.setdefault("detection_labels_by_channel", {})[target] = self.detection_label.currentText()
+            self.settings.setdefault("detection_labels_by_channel", {})[
+                target
+            ] = self.detection_label.currentText()
             self.sync_session_options()
             if self.review:
-                self.review.metadata.setdefault("settings", {}).update({
-                    key: copy.deepcopy(self.settings[key]) for key in (
-                        "training_labels_by_channel", "sorting_methods_by_channel", "detection_labels_by_channel"
-                    )
-                })
+                self.review.metadata.setdefault("settings", {}).update(
+                    {
+                        key: copy.deepcopy(self.settings[key])
+                        for key in (
+                            "training_labels_by_channel",
+                            "sorting_methods_by_channel",
+                            "detection_labels_by_channel",
+                        )
+                    }
+                )
                 self.changed()
         self.update_buttons()
 
     def sync_session_options(self):
         if self.session:
             for key in (
-                "label_targets", "training_labels_by_channel",
-                "sorting_methods_by_channel", "detection_labels_by_channel",
+                "label_targets",
+                "training_labels_by_channel",
+                "sorting_methods_by_channel",
+                "detection_labels_by_channel",
+                "unit_timing_references_by_channel",
+                "unit_timing_window_s",
+                "unit_timing_burst_gap_s",
+                "context_training_speed",
+                "include_moderate_probability_spikes",
             ):
-                self.session.settings[key] = copy.deepcopy(self.settings.get(key, {}))
+                self.session.settings[key] = copy.deepcopy(
+                    self.settings.get(key, default_settings().get(key, {}))
+                )
 
     def invalidate(self, *_):
         self.session = None
@@ -625,8 +950,22 @@ class MainWindow(W.QMainWindow):
             self.segment,
             self.kind,
             self.animal_id,
+            self.context_speed,
         ]:
             w.setEnabled(not busy)
+        context_mode = self.kind.currentIndex() == 0
+        self.timing_group.setEnabled(context_mode and not busy)
+        self.context_speed.setEnabled(context_mode and not busy)
+        self.acceptance_choice.setEnabled(not detection_only and not busy)
+        current_table = (
+            self.review.tables.get(self.acceptance_channel()) if self.review else None
+        )
+        self.apply_acceptance_button.setEnabled(
+            not busy
+            and current_table is not None
+            and "same_label_neighbor_count" in current_table
+        )
+
         self.preprocessing.setEnabled(bool(self.channels) and not busy)
         self.preview_button.setEnabled(bool(self.channels) and not busy)
         self.name_channels.setEnabled(bool(self.channels or self.review) and not busy)
@@ -635,17 +974,28 @@ class MainWindow(W.QMainWindow):
         selected_count = len(self.selected_training_labels())
         self.training_labels_group.setEnabled(not busy and not detection_only)
         self.detection_label.setEnabled(not busy and detection_only)
-        self.labels_button.setEnabled(ready and not detection_only and selected_count > 0)
-        self.train_button.setEnabled(ready and (
-            bool(self.detection_label.currentText()) if detection_only else selected_count >= 2
-        ))
+        self.labels_button.setEnabled(
+            ready and not detection_only and selected_count > 0
+        )
+        self.train_button.setEnabled(
+            ready
+            and (
+                bool(self.detection_label.currentText())
+                if detection_only
+                else selected_count >= 2
+            )
+        )
         self.transfer_button.setEnabled(ready and not detection_only)
         self.import_labels_button.setEnabled(ready and not detection_only)
-        self.train_button.setText("2. Accept detections as spikes" if detection_only else "3. Train and classify")
+        self.train_button.setText(
+            "2. Accept detections as spikes"
+            if detection_only
+            else "3. Train and classify"
+        )
         self.method_hint.setText(
             "Every filtered detection is accepted with the chosen unit label. No training or classifier is needed; review and export as usual."
-            if detection_only else
-            "Check the labels you want to collect and train on for this channel. Other saved examples are kept. Classifiers need at least two selected classes, including Noise if appropriate."
+            if detection_only
+            else "Check the labels you want to collect and train on for this channel. Other saved examples are kept. Classifiers need at least two selected classes, including Noise if appropriate."
         )
         self.viewer.setEnabled(not busy)
         self.progress.setVisible(busy)
@@ -704,10 +1054,15 @@ class MainWindow(W.QMainWindow):
     def loaded(self, result, path, segment):
         self.channels, self.markers, nsegments = result
         try:
-            validate_channel_names([c["name"] for c in self.channels], self.settings.get("channel_names", {}))
+            validate_channel_names(
+                [c["name"] for c in self.channels],
+                self.settings.get("channel_names", {}),
+            )
         except ValueError:
             self.settings["channel_names"] = {}
-            self.append_log("Saved channel names conflict with this recording. Use Name channels to assign new nerve names.")
+            self.append_log(
+                "Saved channel names conflict with this recording. Use Name channels to assign new nerve names."
+            )
         self.recording_path = str(Path(path).resolve())
         self.recording_segment = segment
         self.session = None
@@ -746,6 +1101,7 @@ class MainWindow(W.QMainWindow):
             ),
         )
         self.viewer.set_review(self.review)
+        self.refresh_timing_sources()
         self.preprocessing.set_recording(self.channels, self.settings)
         self.dirty = False
         self.append_log(
@@ -760,7 +1116,9 @@ class MainWindow(W.QMainWindow):
         self.settings.update({k: copy.deepcopy(settings[k]) for k in keys})
         self.close_labeler()
         self.invalidate()
-        self.append_log("Preview settings applied. Filter and detect candidates to use them.")
+        self.append_log(
+            "Preview settings applied. Filter and detect candidates to use them."
+        )
 
     def configure_settings(self):
         dialog = SettingsDialog(self.settings, self)
@@ -769,7 +1127,9 @@ class MainWindow(W.QMainWindow):
             self.settings = dialog.settings
             self.refresh_channel_options()
             if self.review:
-                self.review.metadata["channel_names"] = copy.deepcopy(self.settings.get("channel_names", {}))
+                self.review.metadata["channel_names"] = copy.deepcopy(
+                    self.settings.get("channel_names", {})
+                )
             self.update_channel_names()
             self.preprocessing.set_recording(self.channels, self.settings)
             self.invalidate()
@@ -789,11 +1149,18 @@ class MainWindow(W.QMainWindow):
                 path=self.recording_path,
                 segment=self.recording_segment,
                 settings={
-                    k: v for k, v in settings.items()
-                    if k not in {
-                        "training_labels_by_channel", "sorting_methods_by_channel",
+                    k: v
+                    for k, v in settings.items()
+                    if k
+                    not in {
+                        "training_labels_by_channel",
+                        "sorting_methods_by_channel",
                         "detection_labels_by_channel",
                         "channel_names",
+                        "unit_timing_references_by_channel",
+                        "unit_timing_window_s",
+                        "unit_timing_burst_gap_s",
+                        "context_training_speed",
                     }
                 },
             ),
@@ -840,9 +1207,10 @@ class MainWindow(W.QMainWindow):
             animal_id=self.animal_id.text().strip(),
             channel_names=copy.deepcopy(self.settings.get("channel_names", {})),
         )
-        self.project_path = (
-            Path(self.output.text()).expanduser().resolve()
-            / (file_stem(self.animal_id.text()) + ".lobsort" if self.animal_id.text().strip() else "review.lobsort")
+        self.project_path = Path(self.output.text()).expanduser().resolve() / (
+            file_stem(self.animal_id.text()) + ".lobsort"
+            if self.animal_id.text().strip()
+            else "review.lobsort"
         )
         self.viewer.set_review(self.review)
         self.changed()
@@ -924,7 +1292,9 @@ class MainWindow(W.QMainWindow):
         )
         if not path:
             return
-        named_channels = {self.review.channel_name(source): source for source in self.review.processed}
+        named_channels = {
+            self.review.channel_name(source): source for source in self.review.processed
+        }
         channel, ok = W.QInputDialog.getItem(
             self,
             "Spike channel",
@@ -974,6 +1344,7 @@ class MainWindow(W.QMainWindow):
             self.review.set_table(channel, df)
             self.viewer.set_review(self.review)
             self.viewer.select_channel(channel)
+            self.refresh_timing_sources()
             self.changed()
             self.tabs.setCurrentWidget(self.viewer)
         except Exception:
@@ -988,6 +1359,15 @@ class MainWindow(W.QMainWindow):
                 self.run(lambda: self.session.accept_candidates(label), self.classified)
             else:
                 kind = "context" if self.kind.currentIndex() == 0 else "waveform"
+                try:
+                    (
+                        self.attach_timing_reference()
+                        if kind == "context"
+                        else self.session.set_timing_reference(None)
+                    )
+                except ValueError as exc:
+                    W.QMessageBox.warning(self, "Timing reference", str(exc))
+                    return
                 self.run(lambda: self.session.train(kind), self.classified)
 
     def transfer(self):
@@ -998,6 +1378,12 @@ class MainWindow(W.QMainWindow):
         )
         if path:
             self.close_labeler()
+            self.sync_session_options()
+            try:
+                self.attach_timing_reference()
+            except ValueError as exc:
+                W.QMessageBox.warning(self, "Timing reference", str(exc))
+                return
             self.run(lambda: self.session.transfer(path), self.classified)
 
     def classified(self, table):
@@ -1014,14 +1400,24 @@ class MainWindow(W.QMainWindow):
             target
         ] = self.session.serializable_settings()
         self.review.set_table(target, table)
+        if self.session.active_timing_reference is not None:
+            snapshot = copy.deepcopy(self.session.active_timing_reference)
+            self.review.metadata.setdefault("timing_references", {})[target] = snapshot
+        else:
+            self.review.metadata.setdefault("timing_references", {}).pop(target, None)
+        self.refresh_timing_sources()
         self.viewer.set_review(self.review)
         self.viewer.select_channel(target)
         self.changed()
         self.tabs.setCurrentWidget(self.viewer)
         if table.acceptance_reason.eq("detection_only").all():
-            self.append_log("Detected candidates accepted as spikes. Review and refine, then export curated results.")
+            self.append_log(
+                "Detected candidates accepted as spikes. Review and refine, then export curated results."
+            )
         else:
-            self.append_log("Classification finished. Review and refine spikes, then export curated results.")
+            self.append_log(
+                "Classification finished. Review and refine spikes, then export curated results."
+            )
 
     def changed(self):
         self.dirty = True
@@ -1063,13 +1459,24 @@ class MainWindow(W.QMainWindow):
             self.review = Review.load(path)
             saved = self.review.metadata.get("settings", {})
             for key in (
-                "label_targets", "training_labels_by_channel",
-                "sorting_methods_by_channel", "detection_labels_by_channel",
+                "label_targets",
+                "training_labels_by_channel",
+                "sorting_methods_by_channel",
+                "detection_labels_by_channel",
                 "channel_names",
+                "unit_timing_references_by_channel",
+                "unit_timing_window_s",
+                "unit_timing_burst_gap_s",
+                "context_training_speed",
+                "include_moderate_probability_spikes",
             ):
                 if key in saved:
                     self.settings[key] = copy.deepcopy(saved[key])
-            self.settings["channel_names"] = copy.deepcopy(self.review.metadata.get("channel_names", saved.get("channel_names", {})))
+            self.settings["channel_names"] = copy.deepcopy(
+                self.review.metadata.get(
+                    "channel_names", saved.get("channel_names", {})
+                )
+            )
             self.animal_id.setText(self.review.metadata.get("animal_id", ""))
             self.refresh_channel_options()
             self.project_path = Path(path)
@@ -1089,13 +1496,21 @@ class MainWindow(W.QMainWindow):
             return
         folder = W.QFileDialog.getExistingDirectory(
             self,
-            f"Choose parent folder for {file_stem(self.animal_id.text())}" if self.animal_id.text().strip() else "Export curated spike CSVs",
+            (
+                f"Choose parent folder for {file_stem(self.animal_id.text())}"
+                if self.animal_id.text().strip()
+                else "Export curated spike CSVs"
+            ),
             self.output.text(),
         )
         if folder:
             try:
                 exported = self.review.export(folder)
-                details = exported / "review_details" if self.review.metadata.get("animal_id", "").strip() else exported
+                details = (
+                    exported / "review_details"
+                    if self.review.metadata.get("animal_id", "").strip()
+                    else exported
+                )
                 self.review.save(details / "review.lobsort")
                 self.statusBar().showMessage(
                     f"Exported curated spikes and review to {exported}", 10000
@@ -1129,17 +1544,25 @@ class MainWindow(W.QMainWindow):
                 loaded = json.loads(Path(path).read_text())
                 settings.update({k: v for k, v in loaded.items() if k in settings})
                 if "channel_names" not in loaded:
-                    settings["channel_names"] = copy.deepcopy(self.settings.get("channel_names", {}))
+                    settings["channel_names"] = copy.deepcopy(
+                        self.settings.get("channel_names", {})
+                    )
                 dialog = SettingsDialog(settings, self)
                 if dialog.exec():
-                    sources = [c["name"] for c in self.channels] or list(self.review.processed if self.review else [])
+                    sources = [c["name"] for c in self.channels] or list(
+                        self.review.processed if self.review else []
+                    )
                     if sources:
-                        validate_channel_names(sources, dialog.settings.get("channel_names", {}))
+                        validate_channel_names(
+                            sources, dialog.settings.get("channel_names", {})
+                        )
                     self.close_labeler()
                     self.settings = dialog.settings
                     self.refresh_channel_options()
                     if self.review:
-                        self.review.metadata["channel_names"] = copy.deepcopy(self.settings.get("channel_names", {}))
+                        self.review.metadata["channel_names"] = copy.deepcopy(
+                            self.settings.get("channel_names", {})
+                        )
                     self.update_channel_names()
                     self.preprocessing.set_recording(self.channels, self.settings)
                     self.invalidate()
@@ -1207,4 +1630,3 @@ def main():
     if "--demo" in sys.argv:
         window.demo()
     sys.exit(app.exec())
-

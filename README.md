@@ -199,3 +199,76 @@ nerves. To preserve previous results, exporting another recording/segment under
 the same animal ID, or changing an already exported nerve filename, requires a
 different parent destination. Spike times stay in seconds on the original
 recording timeline; naming does not shift times or combine separate recordings.
+
+## Learn timing from a labeled unit (v0.2)
+
+![Labeled-unit timing and confidence controls, synthetic example](screenshot_timing.png)
+
+The context-aware classifier can now learn the relationship between your target
+labels and the **accepted spikes of a specific unit on another channel**, directly
+from the open review. The reference does not need to be exported or completely
+sorted first.
+
+1. Sort a reference channel using detection-only sorting, a classifier, or manual
+   edits. Its accepted events must have a neuron label, for example `PD`.
+2. Switch to the target channel, detect candidates, and label examples as usual.
+3. Enable **Learn timing from a labeled unit in this review**. Choose the reference
+   **Channel** and **Unit**. Use **Refresh units** if you have just edited reference
+   labels. At least three accepted reference events are required.
+4. Choose **Context-aware classifier**, choose a training speed, and train.
+5. Set **Context acceptance** to **High confidence only** or **High + moderate
+   confidence with sequence support**. Choose **Apply to current channel review**
+   to switch existing context decisions without retraining. Manual edits, invalid
+   waveforms, and existing within-burst ISI rejections are preserved. Apply uses
+   the recorded classification reasons; changed numeric thresholds require
+   classifying again. This choice is classifier confidence, not a promised
+   biological accuracy rate.
+
+With a labeled reference selected, the learned model uses waveform shape and
+amplitude, target candidate spacing/density, and cross-channel timing: time since
+the previous reference spike, time until the next, signed nearest-spike lag,
+local reference counts, position between adjacent spikes, and timing relative to
+reference bursts. Burst boundaries group accepted reference spikes separated by
+no more than the configured gap (default 150 ms); a singleton is not a burst.
+The raw-reference envelope features are replaced in this mode. With the box off,
+the legacy envelope-based context model remains available.
+
+The classifier learns which measured timing relationships distinguish the manual
+target labels. Target labels are not copied into timing features. The existing
+same-label neighbor check remains an **acceptance rule after prediction**, not a
+feature computed from the answers to training examples. By default high means
+at least 80% model confidence, and supported moderate means at least 55% plus
+two other candidates predicted as the same label within ±200 ms. Both cutoffs
+and support parameters remain adjustable in pipeline settings.
+
+Reference timings are frozen when training starts, including current unsaved
+adds/removals/relabels. The source label, fingerprint, accepted event times and
+provenance are retained with the review and in the workspace's
+`timing_reference_snapshot.json`. Later edits take effect on the next train or
+classification run; existing classifications do not change silently. Partially
+sorted references are provisional; missing reference events cannot be treated as
+complete physiological ground truth. Timing outside the reference recording or
+beyond the configured context window is missing rather than an invented phase.
+These measurements can use later reference spikes because this is offline sorting.
+
+Target and reference must be different channels. Known circular reference
+relationships are rejected. Time-blocked validation fits PCA and the classifier
+inside each training fold. If reference labels were themselves produced using
+information from the target, validation is not independent; use an independent
+reference for meaningful accuracy estimates.
+
+**Speed:** Fast uses 200 trees and three validation folds; Thorough uses 500 and
+five. Custom respects the advanced tree/fold controls. Timing queries and the
+existing neighbor counts use sorted-array searches, waveform extraction uses
+bounded chunks, and unchanged unit features are cached across retraining. In one
+local synthetic benchmark, timing features for 100,000 candidates against
+150,000 reference spikes took about 0.05 seconds, with same-label support taking
+about 0.02 seconds. These are feature timings, not whole-recording loading,
+filtering, training or GUI latency guarantees.
+
+New labeled-reference models use a versioned model package. Reusing one requires
+current reference spikes for the **same unit label** in the new recording; the
+training recording's reference times are never substituted. Legacy waveform and
+context models still work. New review settings remember reference choices and
+confidence selection. Download the updated code to use these features; an
+already running copy does not update itself.

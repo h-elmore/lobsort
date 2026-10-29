@@ -45,7 +45,12 @@ waveform_pipeline = Pipeline(
 )
 context_pipeline = Pipeline(
     [
-        ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
+        (
+            "imputer",
+            SimpleImputer(
+                strategy="median", add_indicator=True, keep_empty_features=True
+            ),
+        ),
         ("scaler", StandardScaler()),
     ]
 )

@@ -51,22 +51,10 @@ print(
     "\nCandidates without transferred predictions:",
     int(missing_transferred_prediction.sum()),
 )
-same_label_neighbor_count = np.zeros(len(candidate_features_df), dtype=int)
 candidate_times_all = candidate_features_df["time_seconds"].to_numpy(dtype=float)
-time_sort_order = np.argsort(candidate_times_all)
-sorted_times = candidate_times_all[time_sort_order]
-sorted_labels = all_predicted_labels[time_sort_order]
-for sorted_position, event_time in enumerate(sorted_times):
-    left_position = np.searchsorted(
-        sorted_times, event_time - sequence_support_window_s, side="left"
-    )
-    right_position = np.searchsorted(
-        sorted_times, event_time + sequence_support_window_s, side="right"
-    )
-    nearby_labels = sorted_labels[left_position:right_position]
-    same_label_count = int(np.sum(nearby_labels == sorted_labels[sorted_position])) - 1
-    original_position = time_sort_order[sorted_position]
-    same_label_neighbor_count[original_position] = max(0, same_label_count)
+same_label_neighbor_count = same_label_neighbors(
+    candidate_times_all, all_predicted_labels, sequence_support_window_s
+)
 candidate_features_df["same_label_neighbor_count"] = same_label_neighbor_count
 valid_waveform_mask = candidate_features_df["valid_waveform"].fillna(False).astype(bool)
 target_label_mask = candidate_features_df["predicted_label"] == isi_filtered_label

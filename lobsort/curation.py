@@ -56,6 +56,44 @@ class Review:
         df["accepted_as_spike"] = df.accepted_as_spike.astype(bool)
         self.tables[channel] = df
 
+    def apply_confidence_policy(self, channel, include_moderate):
+        """Reapply existing context decisions without fitting a model or changing edits."""
+        if channel not in self.tables:
+            raise ValueError("This channel has no classifier results to update.")
+        df = self.tables[channel]
+        required = {"acceptance_reason", "same_label_neighbor_count", "valid_waveform"}
+        if not required.issubset(df):
+            raise ValueError(
+                "This channel has no context-classifier decisions. Classify it first."
+            )
+        before = df.copy(deep=True)
+        reasons = ["high_classifier_probability"]
+        if include_moderate:
+            reasons.append("moderate_probability_with_sequence_support")
+        auto = ~df.edit_source.eq("manual")
+        accepted = df.acceptance_reason.isin(reasons) & df.valid_waveform.fillna(
+            False
+        ).astype(bool)
+        # Preserve noise, invalid waveforms, optional ISI rejections, and every manual decision.
+        df.loc[auto, "accepted_as_spike"] = accepted.loc[auto]
+        self.metadata.setdefault("confidence_policies", {})[channel] = (
+            "high_and_supported_moderate" if include_moderate else "high_only"
+        )
+        if df.accepted_as_spike.equals(before.accepted_as_spike):
+            return False
+        self.undo_stack.append((channel, before, df.copy(deep=True)))
+        self.redo_stack.clear()
+        self.audit.append(
+            dict(
+                time=now(),
+                action="confidence_policy",
+                channel=channel,
+                include_moderate=bool(include_moderate),
+                accepted_count=int(df.accepted_as_spike.sum()),
+            )
+        )
+        return True
+
     def change(self, channel, sample_index, action, label="Spike"):
         data = self.processed[channel]
         if not 0 <= sample_index < len(data["time"]):
@@ -230,7 +268,11 @@ class Review:
                 used.add(safe.casefold())
                 filename = f"{safe}.csv"
             else:
-                safe = str(i) + "_" + "".join(c if c.isalnum() or c in "-_" else "_" for c in nerve)
+                safe = (
+                    str(i)
+                    + "_"
+                    + "".join(c if c.isalnum() or c in "-_" else "_" for c in nerve)
+                )
                 filename = f"{safe}_curated_spikes.csv"
             plans.append((source, nerve, table, safe, filename))
 
@@ -243,11 +285,18 @@ class Review:
         prior = details / "settings.json"
         if animal and prior.is_file():
             existing = json.loads(prior.read_text())
-            if (existing.get("animal_id") != animal
+            if (
+                existing.get("animal_id") != animal
                 or existing.get("recording") != self.metadata.get("recording")
                 or existing.get("segment") != self.metadata.get("segment")
-                or any(manifest.get(source) != info for source, info in existing.get("export_files", {}).items())):
-                raise ValueError("This animal folder contains a different recording or nerve-file layout. Choose a different parent folder to keep both exports.")
+                or any(
+                    manifest.get(source) != info
+                    for source, info in existing.get("export_files", {}).items()
+                )
+            ):
+                raise ValueError(
+                    "This animal folder contains a different recording or nerve-file layout. Choose a different parent folder to keep both exports."
+                )
         folder.mkdir(parents=True, exist_ok=True)
         details.mkdir(parents=True, exist_ok=True)
         for source, nerve, table, safe, filename in plans:
@@ -263,7 +312,8 @@ class Review:
             accepted.insert(0, "spike_number", np.arange(1, len(accepted) + 1))
             accepted.to_csv(folder / filename, index=False)
         (details / "edit_history.json").write_text(json.dumps(self.audit, indent=2))
-        metadata = {**self.metadata, "export_files": manifest} if animal else self.metadata
+        metadata = (
+            {**self.metadata, "export_files": manifest} if animal else self.metadata
+        )
         (details / "settings.json").write_text(json.dumps(metadata, indent=2))
         return folder
-

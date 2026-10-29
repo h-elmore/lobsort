@@ -34,3 +34,29 @@ The program runs ordinary Python stages in an isolated namespace per target chan
 ## Known validation boundary
 
 Automated tests use deterministic synthetic signals and check exact spike-index/noise-trace agreement with the supplied detector, model reuse consistency, and editing persistence. This demonstrates software behavior, not scientific classification accuracy. No available biological recording was included in the initial validation run.
+
+## v0.2: learned labeled-unit timing and visible confidence choice
+
+`timing.py` adds vectorized per-unit lag, phase, local activity and burst-timing
+measurements from a frozen accepted-event snapshot of the open review. Selecting
+this reference replaces the full raw-envelope context feature path with waveform
+and spike-timing measurements. Only target manual labels passed to the training
+fold enter the supervised fit; reference features do not contain target labels.
+Known target/reference dependency cycles are rejected, while reference quality
+and independence remain user responsibilities.
+
+The same-label sequence-support rule is retained after prediction. Its counts
+now use per-label sorted searches with the original closed-window boundary and
+self-exclusion semantics. No target predictions are fed back into training.
+A visible confidence selector controls high-only versus high-plus-supported-
+moderate output. Existing context decisions can be switched without retraining,
+with undo and retained manual overrides, noise/invalid rejection, and optional
+ISI rejections. Numeric threshold edits still require classification again.
+
+Model packages distinguish legacy envelope context (v1) and labeled-unit timing
+(v2). V2 records exact expected feature columns and reference unit identity,
+geometry, timing settings and sampling rate. Reuse requires a fresh reference
+snapshot from the current recording. Snapshot provenance is kept in review
+metadata and the workspace; the model contains a fingerprint/specification, not
+training-recording timestamps to reuse on new data. Unit feature caches key on
+reference spike content, waveform geometry, candidate set and timing settings.

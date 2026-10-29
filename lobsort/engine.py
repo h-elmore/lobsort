@@ -11,6 +11,8 @@ from pathlib import Path
 import io
 import contextlib
 import os
+import time
+from .timing import same_label_neighbors, reference_fingerprint, unit_context_features
 import numpy as np
 import pandas as pd
 import joblib
@@ -154,7 +156,10 @@ class Overrides(ast.NodeTransformer):
 
 class PipelineSession:
     def __init__(self, channels, settings, output_dir, log=print):
-        self.settings = copy.deepcopy(settings)
+        self.settings = {**default_settings(), **copy.deepcopy(settings)}
+        self.timing_reference = None
+        self.active_timing_reference = None
+        self._unit_feature_cache = None
         self.output_dir = Path(output_dir).resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.log = log
@@ -288,11 +293,14 @@ class PipelineSession:
         names = self.settings.get("channel_names", {})
         target = self.settings["channel_name"]
         reference = self.settings["reference_channel_name"]
-        self.run("labeler", {
-            "label_targets": self.training_targets(),
-            "display_channel_name": names.get(target, target),
-            "display_reference_channel_name": names.get(reference, reference),
-        })
+        self.run(
+            "labeler",
+            {
+                "label_targets": self.training_targets(),
+                "display_channel_name": names.get(target, target),
+                "display_reference_channel_name": names.get(reference, reference),
+            },
+        )
         return self.ns["CandidateLabeler"]()
 
     def training_targets(self):
@@ -310,9 +318,13 @@ class PipelineSession:
 
     def accept_candidates(self, label):
         """Accept detector peaks as one unit without fitting a classifier."""
+        self.active_timing_reference = None
         label = canonical_label(label)
         if label not in self.settings["label_targets"] or label.lower() in {
-            "noise", "uncertain", "unlabeled", "nan",
+            "noise",
+            "uncertain",
+            "unlabeled",
+            "nan",
         }:
             raise ValueError("Choose a neuron label from the saved label library.")
         if "candidate_result" not in self.ns:
@@ -325,19 +337,116 @@ class PipelineSession:
         # No classifier probabilities or waveform-boundary exclusions are invented.
         df.to_csv(self.output_dir / "automatic_candidates.csv", index=False)
         target = self.settings["channel_name"]
-        self.settings.setdefault("sorting_methods_by_channel", {})[target] = "detection_only"
+        self.settings.setdefault("sorting_methods_by_channel", {})[
+            target
+        ] = "detection_only"
         self.settings.setdefault("detection_labels_by_channel", {})[target] = label
-        self.log(f"Accepted {len(df)} detected candidates as {label}; no classifier used.")
+        self.log(
+            f"Accepted {len(df)} detected candidates as {label}; no classifier used."
+        )
         return df
 
-    def features(self):
-        self.run(
-            "context_features",
-            {
-                "waveform_before_ms": self.settings["context_waveform_before_ms"],
-                "waveform_after_ms": self.settings["context_waveform_after_ms"],
-            },
-        )
+    def set_timing_reference(self, snapshot):
+        """Freeze current accepted reference decisions at the start of training."""
+        if snapshot is None:
+            self.timing_reference = None
+            return
+        reference = copy.deepcopy(snapshot)
+        if reference["channel"] == self.settings["channel_name"]:
+            raise ValueError(
+                "The timing reference must be on a different channel from the target."
+            )
+        times = np.unique(np.asarray(reference["times"], dtype=float))
+        if len(times) < 3 or not np.all(np.isfinite(times)):
+            raise ValueError(
+                "The timing reference needs at least three finite accepted spikes."
+            )
+        bounds = reference["recording_bounds"]
+        if (
+            len(bounds) != 2
+            or not np.all(np.isfinite(bounds))
+            or bounds[1] <= bounds[0]
+        ):
+            raise ValueError("Invalid timing reference recording bounds.")
+        if np.any(times < bounds[0]) or np.any(times > bounds[1]):
+            raise ValueError("Timing reference spikes fall outside their recording.")
+        reference["times"] = times.tolist()
+        reference["fingerprint"] = reference_fingerprint(reference)
+        self.timing_reference = reference
+
+    def features(self, model_settings=None, use_unit=None):
+        settings = {**self.settings, **(model_settings or {})}
+        use_unit = self.timing_reference is not None if use_unit is None else use_unit
+        if use_unit:
+            if self.timing_reference is None:
+                raise ValueError(
+                    "Select a labeled timing reference channel and unit from this recording before using this model."
+                )
+            keys = [
+                "context_waveform_before_ms",
+                "context_waveform_after_ms",
+                "sequence_support_window_s",
+                "unit_timing_window_s",
+                "unit_timing_burst_gap_s",
+            ]
+            key = (
+                id(self.ns["candidate_result"]),
+                self.timing_reference["fingerprint"],
+                tuple(settings[k] for k in keys),
+            )
+            start = time.perf_counter()
+            if self._unit_feature_cache is None or self._unit_feature_cache[0] != key:
+                features = unit_context_features(
+                    self.ns["candidate_result"], self.timing_reference, settings
+                )
+                self._unit_feature_cache = (key, features)
+                cached = False
+            else:
+                features = self._unit_feature_cache[1]
+                cached = True
+            self.active_timing_reference = copy.deepcopy(self.timing_reference)
+            self.ns.update(features)
+            # Prediction adds columns; keep the cached feature measurements pristine.
+            self.ns["candidate_features_df"] = features["candidate_features_df"].copy()
+            self.log(
+                f"Labeled-unit timing features {'reused' if cached else 'built'} in {time.perf_counter()-start:.3f} s; "
+                f"{len(features['candidate_features_df']):,} candidates, {len(self.timing_reference['times']):,} reference spikes."
+            )
+        else:
+            self.active_timing_reference = None
+            overrides = {
+                k: settings[k]
+                for k in [
+                    "reference_signal_key",
+                    "reference_burst_threshold_factor",
+                    "maximum_reference_burst_gap_s",
+                    "maximum_reliable_reference_burst_duration_s",
+                    "unreliable_reference_padding_s",
+                    "local_context_seconds",
+                    "reference_envelope_smoothing_ms",
+                    "minimum_reference_burst_duration_s",
+                ]
+            }
+            overrides.update(
+                waveform_before_ms=settings["context_waveform_before_ms"],
+                waveform_after_ms=settings["context_waveform_after_ms"],
+            )
+            self.run("context_features", overrides)
+
+    def context_training_options(self):
+        mode = self.settings.get("context_training_speed", "fast")
+        options = {
+            "fast": (200, 3),
+            "thorough": (500, 5),
+            "custom": (
+                self.settings["number_of_trees"],
+                self.settings["number_of_validation_time_blocks"],
+            ),
+        }
+        if mode not in options:
+            raise ValueError("Unknown context training speed.")
+        trees, folds = options[mode]
+        return dict(number_of_trees=trees, number_of_validation_time_blocks=folds)
 
     def train(self, kind="context"):
         targets = self.training_targets()
@@ -352,30 +461,64 @@ class PipelineSession:
             )
         self.ns["manual_labels_df"] = df
         if kind == "waveform":
+            self.active_timing_reference = None
             self.run("waveform_train", {"label_targets": targets})
         else:
+            self.ns.pop("feature_columns_for_prediction", None)
             self.features()
-            self.run("context_train")
+            self.run("context_train", self.context_training_options())
             package = dict(
-                format="lobsort-context-v1",
+                format=(
+                    "lobsort-context-v2"
+                    if self.timing_reference is not None
+                    else "lobsort-context-v1"
+                ),
+                timing_reference_spec=(
+                    {k: v for k, v in self.timing_reference.items() if k != "times"}
+                    if self.timing_reference
+                    else None
+                ),
+                feature_columns=self.ns["waveform_feature_columns"]
+                + self.ns["context_feature_columns"],
+                training_options=self.context_training_options(),
                 classifier=self.ns["context_classifier"],
                 settings=self.serializable_settings(),
                 sampling_rate=float(self.ns["candidate_result"]["sampling_rate"]),
             )
             joblib.dump(package, self.output_dir / "context_classifier.joblib")
+            if self.timing_reference is not None:
+                (self.output_dir / "timing_reference_snapshot.json").write_text(
+                    json.dumps(self.timing_reference, indent=2)
+                )
             self.run("context_predict")
         return self.result(kind)
 
     def transfer(self, model_path):
         package = joblib.load(model_path)
-        if package.get("format") == "lobsort-context-v1":
+        if package.get("format") in {"lobsort-context-v1", "lobsort-context-v2"}:
             model_settings = package["settings"]
             rate = float(self.ns["candidate_result"]["sampling_rate"])
             if not np.isclose(rate, package["sampling_rate"], rtol=1e-5):
                 raise ValueError(
                     "This context model uses a different sampling rate. Train a model for this recording."
                 )
-            self.features_from_model(model_settings)
+            if package["format"] == "lobsort-context-v2":
+                if self.timing_reference is None:
+                    raise ValueError(
+                        "This model needs a labeled timing reference. Select its channel and unit in this recording first."
+                    )
+                if (
+                    self.timing_reference["label"]
+                    != package["timing_reference_spec"]["label"]
+                ):
+                    raise ValueError(
+                        "Select the same reference unit label used to train this model."
+                    )
+                self.features(model_settings, use_unit=True)
+                self.ns["feature_columns_for_prediction"] = package["feature_columns"]
+            else:
+                self.features_from_model(model_settings)
+                self.ns.pop("feature_columns_for_prediction", None)
             self.ns["context_classifier"] = package["classifier"]
             self.run("context_predict")
             return self.result("context")
@@ -385,31 +528,13 @@ class PipelineSession:
             self.ns["classified_candidates_df"][col] = self.ns[
                 "classified_candidates_df"
             ][col].map(canonical_label)
-        self.features()
+        self.features(use_unit=False)
         self.run("transfer_merge")
         self.run("transfer_rules")
         return self.result("transfer")
 
     def features_from_model(self, saved):
-        # Context model input depends on waveform geometry and reference envelope settings.
-        keys = [
-            "context_waveform_before_ms",
-            "context_waveform_after_ms",
-            "reference_signal_key",
-            "reference_burst_threshold_factor",
-            "maximum_reference_burst_gap_s",
-            "maximum_reliable_reference_burst_duration_s",
-            "unreliable_reference_padding_s",
-            "local_context_seconds",
-            "reference_envelope_smoothing_ms",
-            "minimum_reference_burst_duration_s",
-        ]
-        overrides = {k: saved[k] for k in keys}
-        overrides.update(
-            waveform_before_ms=saved["context_waveform_before_ms"],
-            waveform_after_ms=saved["context_waveform_after_ms"],
-        )
-        self.run("context_features", overrides)
+        self.features(saved, use_unit=False)
 
     def result(self, kind):
         if kind == "waveform":
@@ -438,4 +563,3 @@ class PipelineSession:
         return {
             k: (str(v) if isinstance(v, Path) else v) for k, v in self.settings.items()
         }
-

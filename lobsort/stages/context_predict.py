@@ -1,7 +1,10 @@
 """Extracted from spike_sort_v3.ipynb, cell 41."""
 
 X_all_candidates = candidate_features_df[
-    waveform_feature_columns + context_feature_columns
+    globals().get(
+        "feature_columns_for_prediction",
+        waveform_feature_columns + context_feature_columns,
+    )
 ]
 all_predicted_labels = context_classifier.predict(X_all_candidates)
 all_prediction_probabilities = context_classifier.predict_proba(X_all_candidates)
@@ -15,22 +18,10 @@ for class_position, class_name in enumerate(classifier_classes):
 candidate_features_df["predicted_label"] = all_predicted_labels
 candidate_features_df["prediction_probability"] = maximum_prediction_probability
 predicted_labels = np.asarray(all_predicted_labels).astype(str)
-same_label_neighbor_count = np.zeros(len(candidate_features_df), dtype=int)
 candidate_times_all = candidate_features_df["time_seconds"].to_numpy(dtype=float)
-time_sort_order = np.argsort(candidate_times_all)
-sorted_times = candidate_times_all[time_sort_order]
-sorted_labels = predicted_labels[time_sort_order]
-for sorted_position, event_time in enumerate(sorted_times):
-    left_position = np.searchsorted(
-        sorted_times, event_time - sequence_support_window_s, side="left"
-    )
-    right_position = np.searchsorted(
-        sorted_times, event_time + sequence_support_window_s, side="right"
-    )
-    nearby_labels = sorted_labels[left_position:right_position]
-    same_label_count = int(np.sum(nearby_labels == sorted_labels[sorted_position])) - 1
-    original_position = time_sort_order[sorted_position]
-    same_label_neighbor_count[original_position] = max(0, same_label_count)
+same_label_neighbor_count = same_label_neighbors(
+    candidate_times_all, predicted_labels, sequence_support_window_s
+)
 candidate_features_df["same_label_neighbor_count"] = same_label_neighbor_count
 predicted_as_neuron = (
     candidate_features_df["predicted_label"].astype(str) != noise_label
