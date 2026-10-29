@@ -147,14 +147,25 @@ class PreprocessingWidget(W.QWidget):
         self.baseline = copy.deepcopy(settings)
         self.settings = copy.deepcopy(settings)
         self.bounds_channel = None
-        old = self.channel.currentText()
+        old = self.channel.currentData()
         self.channel.clear()
-        self.channel.addItems([c["name"] for c in channels])
-        if old in [c["name"] for c in channels]:
-            self.channel.setCurrentText(old)
+        for c in channels:
+            self.channel.addItem(settings.get("channel_names", {}).get(c["name"], c["name"]), c["name"])
+        if self.channel.findData(old) >= 0:
+            self.channel.setCurrentIndex(self.channel.findData(old))
         self.updating = False
         self.setEnabled(bool(channels))
         self.select_channel()
+
+    def set_channel_names(self, names):
+        self.settings["channel_names"] = copy.deepcopy(names)
+        if hasattr(self, "baseline"):
+            self.baseline["channel_names"] = copy.deepcopy(names)
+        self.channel.blockSignals(True)
+        for index in range(self.channel.count()):
+            source = self.channel.itemData(index)
+            self.channel.setItemText(index, names.get(source, source))
+        self.channel.blockSignals(False)
 
     def select_channel(self, *_):
         if self.updating or not self.channels:

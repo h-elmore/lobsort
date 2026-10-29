@@ -11,6 +11,7 @@ import zipfile
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
+from .recording_metadata import file_stem
 
 
 def now():
@@ -27,6 +28,9 @@ class Review:
         self.redo_stack = []
         for channel, table in (tables or {}).items():
             self.set_table(channel, table)
+
+    def channel_name(self, source):
+        return self.metadata.get("channel_names", {}).get(source, source)
 
     def set_table(self, channel, table):
         if channel in self.tables:
@@ -208,13 +212,58 @@ class Review:
 
     def export(self, folder):
         folder = Path(folder)
+        animal = str(self.metadata.get("animal_id", "")).strip()
+        if animal:
+            folder = folder / file_stem(animal)
+        details = folder / "review_details" if animal else folder
+        plans = []
+        used = set()
+        for i, (source, table) in enumerate(self.tables.items()):
+            nerve = self.channel_name(source)
+            if animal:
+                base = file_stem(nerve, "channel")
+                safe = base
+                suffix = 2
+                while safe.casefold() in used:
+                    safe = f"{base}_{suffix}"
+                    suffix += 1
+                used.add(safe.casefold())
+                filename = f"{safe}.csv"
+            else:
+                safe = str(i) + "_" + "".join(c if c.isalnum() or c in "-_" else "_" for c in nerve)
+                filename = f"{safe}_curated_spikes.csv"
+            plans.append((source, nerve, table, safe, filename))
+
+        manifest = {
+            source: {"name": nerve, "file": filename}
+            for source, nerve, _, _, filename in plans
+        }
+        # Re-exporting this recording updates its CSVs; a different recording or
+        # changed nerve-file layout needs a separate destination to keep both exports.
+        prior = details / "settings.json"
+        if animal and prior.is_file():
+            existing = json.loads(prior.read_text())
+            if (existing.get("animal_id") != animal
+                or existing.get("recording") != self.metadata.get("recording")
+                or existing.get("segment") != self.metadata.get("segment")
+                or any(manifest.get(source) != info for source, info in existing.get("export_files", {}).items())):
+                raise ValueError("This animal folder contains a different recording or nerve-file layout. Choose a different parent folder to keep both exports.")
         folder.mkdir(parents=True, exist_ok=True)
-        for i, (channel, df) in enumerate(self.tables.items()):
-            safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in channel)
-            df.to_csv(folder / f"{i}_{safe}_all_candidates.csv", index=False)
+        details.mkdir(parents=True, exist_ok=True)
+        for source, nerve, table, safe, filename in plans:
+            df = table.copy()
+            if animal or nerve != source:
+                df["source_channel"] = source
+                df["channel"] = nerve
+            if animal:
+                df["animal_id"] = animal
+            df.to_csv(details / f"{safe}_all_candidates.csv", index=False)
             accepted = df.loc[df.accepted_as_spike].sort_values("time_seconds").copy()
             accepted = accepted.drop(columns=["spike_number"], errors="ignore")
             accepted.insert(0, "spike_number", np.arange(1, len(accepted) + 1))
-            accepted.to_csv(folder / f"{i}_{safe}_curated_spikes.csv", index=False)
-        (folder / "edit_history.json").write_text(json.dumps(self.audit, indent=2))
-        (folder / "settings.json").write_text(json.dumps(self.metadata, indent=2))
+            accepted.to_csv(folder / filename, index=False)
+        (details / "edit_history.json").write_text(json.dumps(self.audit, indent=2))
+        metadata = {**self.metadata, "export_files": manifest} if animal else self.metadata
+        (details / "settings.json").write_text(json.dumps(metadata, indent=2))
+        return folder
+

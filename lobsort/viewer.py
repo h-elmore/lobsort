@@ -145,7 +145,8 @@ class ReviewWidget(W.QWidget):
                 item.widget().deleteLater()
         self.plots = {}
         self.channel.clear()
-        self.channel.addItems(list(review.processed))
+        for source in review.processed:
+            self.channel.addItem(review.channel_name(source), source)
         self.first = min(float(d["time"][0]) for d in review.processed.values())
         self.last = max(float(d["time"][-1]) for d in review.processed.values())
         self.start.setRange(self.first, self.last)
@@ -157,7 +158,7 @@ class ReviewWidget(W.QWidget):
             plot.setMinimumHeight(230)
             plot.setBackground("#141d2c")
             plot.showGrid(x=True, y=True, alpha=0.15)
-            plot.setLabel("left", name, units=data.get("units", ""))
+            plot.setLabel("left", review.channel_name(name), units=data.get("units", ""))
             plot.setLabel("bottom", "Time", units="s")
             plot.setMouseEnabled(x=False, y=True)
             plot.scrolled.connect(self.shift)
@@ -180,6 +181,23 @@ class ReviewWidget(W.QWidget):
         existing = {self.label.itemText(i) for i in range(self.label.count())}
         self.label.addItems([s for s in labels if s not in existing])
         self.refresh()
+
+    def update_channel_names(self):
+        if not self.review:
+            return
+        self.channel.blockSignals(True)
+        for index in range(self.channel.count()):
+            source = self.channel.itemData(index)
+            self.channel.setItemText(index, self.review.channel_name(source))
+        self.channel.blockSignals(False)
+        for source, (plot, _) in self.plots.items():
+            plot.setLabel("left", self.review.channel_name(source), units=self.review.processed[source].get("units", ""))
+        self.refresh()
+
+    def select_channel(self, source):
+        index = self.channel.findData(source)
+        if index >= 0:
+            self.channel.setCurrentIndex(index)
 
     def shift(self, fraction):
         if self.review:
@@ -290,9 +308,9 @@ class ReviewWidget(W.QWidget):
                 half = max((high - low) / 2, 1e-9) / self.yzoom.value()
                 plot.setYRange(center - half, center + half, padding=0.08)
             plot.setTitle(
-                f"{name}"
-                + (" • editing" if name == self.channel.currentText() else ""),
-                color="#43d9ad" if name == self.channel.currentText() else "#b5c3d9",
+                self.review.channel_name(name)
+                + (" • editing" if name == self.channel.currentData() else ""),
+                color="#43d9ad" if name == self.channel.currentData() else "#b5c3d9",
             )
         legend = "  ·  ".join(
             f"{label}" for label in all_labels if label.lower() != "noise"
@@ -308,7 +326,7 @@ class ReviewWidget(W.QWidget):
             or event.button() != QtCore.Qt.MouseButton.LeftButton
         ):
             return
-        if name != self.channel.currentText():
+        if name != self.channel.currentData():
             return
         plot = self.plots[name][0]
         if not plot.sceneBoundingRect().contains(event.scenePos()):
@@ -394,7 +412,7 @@ class ReviewWidget(W.QWidget):
     def jump(self, direction):
         if not self.review:
             return
-        df = self.review.tables.get(self.channel.currentText())
+        df = self.review.tables.get(self.channel.currentData())
         if df is None:
             return
         times = np.sort(df.loc[df.accepted_as_spike, "time_seconds"].to_numpy())
@@ -411,3 +429,4 @@ class ReviewWidget(W.QWidget):
                 max(self.first, self.last - self.window.value()),
             )
         )
+

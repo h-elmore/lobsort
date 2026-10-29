@@ -285,7 +285,14 @@ class PipelineSession:
         import pyqtgraph as pg
 
         self.ns.update(QtCore=QtCore, QtWidgets=QtWidgets, QtGui=QtGui, pg=pg)
-        self.run("labeler", {"label_targets": self.training_targets()})
+        names = self.settings.get("channel_names", {})
+        target = self.settings["channel_name"]
+        reference = self.settings["reference_channel_name"]
+        self.run("labeler", {
+            "label_targets": self.training_targets(),
+            "display_channel_name": names.get(target, target),
+            "display_reference_channel_name": names.get(reference, reference),
+        })
         return self.ns["CandidateLabeler"]()
 
     def training_targets(self):
